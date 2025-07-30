@@ -58,7 +58,7 @@ See [README.md](./README.md#prepare-environment-variables) for required environm
 ## Tool Parameters
 
 ### `index_codebase`
-- `path` (required): Path to the codebase directory
+- `path` (required): **ABSOLUTE** path to the codebase directory (e.g., `/Users/username/project`). Use project root, NOT relative paths.
 - `force` (optional): Force re-indexing even if already indexed (default: false)
 - `splitter` (optional): Code splitter type - 'ast' or 'langchain' (default: 'ast')  
 - `ignorePatterns` (optional): Additional ignore patterns to add to defaults (default: [])
@@ -66,12 +66,12 @@ See [README.md](./README.md#prepare-environment-variables) for required environm
   - Merged with default patterns (node_modules, .git, etc.)
 
 ### `search_code`
-- `path` (required): Path to the indexed codebase
+- `path` (required): **ABSOLUTE** path to the indexed codebase (e.g., `/Users/username/project`). Use project root, NOT relative paths or specific files.
 - `query` (required): Natural language search query
 - `limit` (optional): Maximum number of results (default: 10, max: 50)
 
 ### `clear_index`
-- `path` (required): Path to the codebase to clear
+- `path` (required): **ABSOLUTE** path to the codebase to clear (e.g., `/Users/username/project`). Use project root, NOT relative paths.
 
 ## Guidelines
 
@@ -115,4 +115,4 @@ Use all three MCP tools:
 ## Questions?
 
 - **General questions**: See [main contributing guide](../../CONTRIBUTING.md)
-- **MCP-specific issues**: Open an issue with the `mcp` label 
+- **MCP-specific issues**: Open an issue with the `mcp` label

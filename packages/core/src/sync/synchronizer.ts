@@ -21,6 +21,19 @@ export class FileSynchronizer {
         this.supportedExtensions = supportedExtensions;
     }
 
+    private async loadGitignore() {
+        const gitignorePath = path.join(this.rootDir, '.gitignore');
+        try {
+            const gitignoreContent = await fs.readFile(gitignorePath, 'utf-8');
+            const gitignorePatterns = gitignoreContent.split('\n').filter(line => line.trim() && !line.startsWith('#'));
+            this.ignorePatterns = [...new Set([...this.ignorePatterns, ...gitignorePatterns])];
+        } catch (error: any) {
+            if (error.code !== 'ENOENT') {
+                console.warn(`Error reading .gitignore file: ${error.message}`);
+            }
+        }
+    }
+
     private getSnapshotPath(codebasePath: string): string {
         const homeDir = os.homedir();
         const merkleDir = path.join(homeDir, '.codecontext', 'merkle');
@@ -254,6 +267,7 @@ export class FileSynchronizer {
 
     public async initialize() {
         console.log(`Initializing file synchronizer for ${this.rootDir}`);
+        await this.loadGitignore();
         await this.loadSnapshot();
         this.merkleDAG = this.buildMerkleDAG(this.fileHashes);
         console.log(`File synchronizer initialized. Loaded ${this.fileHashes.size} file hashes.`);
@@ -313,6 +327,14 @@ export class FileSynchronizer {
 
     public getFileHash(filePath: string): string | undefined {
         return this.fileHashes.get(filePath);
+    }
+
+    public getIgnorePatterns(): string[] {
+        return [...this.ignorePatterns];
+    }
+
+    public getTrackedFiles(): string[] {
+        return Array.from(this.fileHashes.keys());
     }
 
     private async saveSnapshot(): Promise<void> {

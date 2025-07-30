@@ -324,13 +324,13 @@ class CodeContextMcpServer {
                 tools: [
                     {
                         name: "index_codebase",
-                        description: "Index a codebase directory for semantic search with configurable code splitter",
+                        description: "Index a codebase directory for semantic search. CRITICAL: Use ONLY JSON format with named parameters, NEVER XML format. Example: {\"path\": \"/Users/username/project\", \"force\": false, \"splitter\": \"ast\"}. Always use ABSOLUTE paths and project ROOT directory.",
                         inputSchema: {
                             type: "object",
                             properties: {
                                 path: {
                                     type: "string",
-                                    description: "Path to the codebase directory to index"
+                                    description: "ABSOLUTE path to the codebase directory to index. MUST be an absolute path (e.g., /Users/username/project), NOT a relative path. Use the project root directory."
                                 },
                                 force: {
                                     type: "boolean",
@@ -357,22 +357,23 @@ class CodeContextMcpServer {
                     },
                     {
                         name: "search_code",
-                        description: "Search the indexed codebase using natural language queries within specified path. If the codebase is currently being indexed, you should inform the user that the search results may be incomplete or inaccurate until indexing completes.",
+                        description: "Search the indexed codebase using natural language queries. CRITICAL: Use ONLY JSON format with named parameters, NEVER XML format. Example: {\"path\": \"/Users/username/project\", \"query\": \"search terms\", \"limit\": 10}. Always use ABSOLUTE paths and project ROOT directory.",
                         inputSchema: {
                             type: "object",
                             properties: {
                                 path: {
                                     type: "string",
-                                    description: "Path to the codebase directory to search in"
+                                    description: "ABSOLUTE path to the codebase directory to search in. MUST be an absolute path (e.g., /Users/username/project), NOT a relative path. Always use the project root directory for comprehensive search, NOT specific file paths."
                                 },
                                 query: {
                                     type: "string",
-                                    description: "Natural language query to search for in the codebase"
+                                    description: "Natural language query to search for in the codebase. Describe what functionality or code you're looking for in plain language."
                                 },
                                 limit: {
                                     type: "number",
-                                    description: "Maximum number of results to return",
+                                    description: "Maximum number of results to return (1-50)",
                                     default: 10,
+                                    minimum: 1,
                                     maximum: 50
                                 }
                             },
@@ -381,13 +382,13 @@ class CodeContextMcpServer {
                     },
                     {
                         name: "clear_index",
-                        description: "Clear the search index",
+                        description: "Clear the search index for a given codebase. CRITICAL: Use ONLY JSON format with named parameters, NEVER XML format. Example: {\"path\": \"/Users/username/project\"}. Always use ABSOLUTE paths.",
                         inputSchema: {
                             type: "object",
                             properties: {
                                 path: {
                                     type: "string",
-                                    description: "Path to the codebase directory to clear"
+                                    description: "ABSOLUTE path to the codebase directory to clear. MUST be an absolute path (e.g., /Users/username/project), NOT a relative path."
                                 }
                             },
                             required: ["path"]
@@ -395,13 +396,13 @@ class CodeContextMcpServer {
                     },
                     {
                         name: "get_indexing_status",
-                        description: "Get the current indexing status for a specific codebase or all codebases. Shows progress information including phase, percentage, and estimated time remaining.",
+                        description: "Get indexing status for a codebase. CRITICAL: Use ONLY JSON format with named parameters, NEVER XML format. Example: {\"path\": \"/Users/username/project\"}. Always use ABSOLUTE paths.",
                         inputSchema: {
                             type: "object",
                             properties: {
                                 path: {
                                     type: "string",
-                                    description: "Optional path to the codebase directory to check status for. If not provided, shows status for all indexing codebases."
+                                    description: "Optional ABSOLUTE path to the codebase directory to check status for. If provided, MUST be an absolute path (e.g., /Users/username/project), NOT a relative path. If not provided, shows status for all indexing codebases."
                                 }
                             },
                             required: []
@@ -414,6 +415,23 @@ class CodeContextMcpServer {
         // Handle tool execution
         this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const { name, arguments: args } = request.params;
+
+            // Log the incoming request for debugging
+            console.log(`[MCP-CALL] Tool called: ${name}`);
+            console.log(`[MCP-CALL] Raw arguments received:`, JSON.stringify(args, null, 2));
+            console.log(`[MCP-CALL] Arguments type:`, typeof args);
+
+            // Validate that arguments is a proper object
+            if (!args || typeof args !== 'object') {
+                console.error(`[MCP-CALL] Invalid arguments: expected object, got ${typeof args}`);
+                return {
+                    content: [{
+                        type: "text",
+                        text: `Error: Invalid tool arguments. Please ensure you're calling the tool with proper JSON format like: {"path": "/absolute/path", "query": "search terms"}`
+                    }],
+                    isError: true
+                };
+            }
 
             switch (name) {
                 case "index_codebase":
@@ -792,8 +810,31 @@ class CodeContextMcpServer {
     }
 
     private async handleSearchCode(args: any) {
+        // Enhanced parameter validation
+        if (!args.path) {
+            return {
+                content: [{
+                    type: "text",
+                    text: `Error: Missing required parameter 'path'. Please provide the absolute path to the codebase directory to search in. Example: {"path": "/Users/username/project", "query": "search terms"}`
+                }],
+                isError: true
+            };
+        }
+
+        if (!args.query) {
+            return {
+                content: [{
+                    type: "text",
+                    text: `Error: Missing required parameter 'query'. Please provide the search query string. Example: {"path": "/Users/username/project", "query": "search terms"}`
+                }],
+                isError: true
+            };
+        }
+
         const { path: codebasePath, query, limit = 10 } = args;
         const resultLimit = limit || 10;
+
+        console.log(`[SEARCH-VALIDATION] Received search request: path='${codebasePath}', query='${query}', limit=${resultLimit}`);
 
         try {
             // Force absolute path resolution - warn if relative path provided
@@ -1240,18 +1281,13 @@ class CodeContextMcpServer {
             return inputPath;
         }
 
-        // For relative paths, we need to be more careful
-        // Log a warning about potential path resolution issues
-        console.warn(`Relative path detected: '${inputPath}'. Converting to absolute path.`);
+        // Log a warning about relative paths
+        console.warn(`[PATH-RESOLVE] ⚠️  RELATIVE PATH DETECTED: '${inputPath}'. For best results, always use ABSOLUTE paths (e.g., ${this.currentWorkspace}).`);
 
-        // Common relative path patterns that might indicate user intent
-        if (inputPath === '.' || inputPath === './') {
-            console.warn(`Current directory reference detected. This may not resolve to the directory you expect in MCP context.`);
-        }
-
-        // Try to resolve relative to current working directory
-        const resolved = path.resolve(inputPath);
-        console.warn(`Resolved relative path '${inputPath}' to '${resolved}'. If this is incorrect, please provide an absolute path.`);
+        // For common relative path patterns, resolve from the current workspace root
+        const resolved = path.resolve(this.currentWorkspace, inputPath);
+        
+        console.warn(`[PATH-RESOLVE] 📍 RESOLVED: '${inputPath}' → '${resolved}'. If this is not your project root, please provide the correct ABSOLUTE path.`);
 
         return resolved;
     }

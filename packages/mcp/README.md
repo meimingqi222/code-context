@@ -531,13 +531,14 @@ npx @zilliz/code-context-mcp@latest
 Index a codebase directory for semantic search.
 
 **Parameters:**
-- `path` (required): Path to the codebase directory to index
+- `path` (required): **ABSOLUTE** path to the codebase directory to index (e.g., `/Users/username/project`). Use the project root directory, NOT relative paths.
 - `force` (optional): Force re-indexing even if already indexed (default: false)
 
 ### 2. `search_code`
 Search the indexed codebase using natural language queries.
 
 **Parameters:**
+- `path` (required): **ABSOLUTE** path to the codebase directory to search in (e.g., `/Users/username/project`). Use the project root directory, NOT relative paths or specific file paths.
 - `query` (required): Natural language query to search for in the codebase
 - `limit` (optional): Maximum number of results to return (default: 10, max: 50)
 
@@ -562,4 +563,4 @@ This package is part of the CodeContext monorepo. Please see:
 
 ## License
 
-MIT - See [LICENSE](../../LICENSE) for details 
+MIT - See [LICENSE](../../LICENSE) for details

@@ -1,0 +1,30 @@
+# MCP Server 开发规则
+
+## 当前目录特定指导
+
+这是Code Context MCP Server的实现目录。在分析或修改这里的代码时：
+
+### 重点关注
+
+1. **索引进度跟踪**：
+   - `IndexingProgress` 接口和相关实现
+   - `handleGetIndexingStatus` 方法
+   - 进度回调在 `startBackgroundIndexing` 中的使用
+
+2. **文件过滤优化**：
+   - `FileSynchronizer` 只跟踪支持的文件扩展名
+   - 大文件保护机制
+   - gitignore模式匹配
+
+3. **MCP工具定义**：
+   - `setupTools()` 方法中的工具注册
+   - 各个 `handle*` 方法的实现
+   - 错误处理和响应格式
+
+### 搜索建议
+
+使用语义搜索时，重点关注以下功能模块：
+- "MCP工具处理器实现"
+- "后台索引进度管理"
+- "文件同步器扩展名过滤"
+- "索引状态查询接口"
