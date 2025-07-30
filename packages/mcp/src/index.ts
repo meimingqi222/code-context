@@ -189,6 +189,20 @@ Search the indexed codebase using natural language queries within a specified ab
                             required: ["path"]
                         }
                     },
+                    {
+                        name: "get_indexing_status",
+                        description: "Get the current indexing status for a specific codebase or all codebases. Shows progress information including phase, percentage, and estimated time remaining.",
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                path: {
+                                    type: "string",
+                                    description: `Optional ABSOLUTE path to the codebase directory to check status for. Current working directory is: ${currentWorkingDirectory}. If not provided, shows status for all indexing codebases.`
+                                }
+                            },
+                            required: []
+                        }
+                    },
                 ]
             };
         });
@@ -204,6 +218,8 @@ Search the indexed codebase using natural language queries within a specified ab
                     return await this.toolHandlers.handleSearchCode(args);
                 case "clear_index":
                     return await this.toolHandlers.handleClearIndex(args);
+                case "get_indexing_status":
+                    return await this.toolHandlers.handleGetIndexingStatus(args);
 
                 default:
                     throw new Error(`Unknown tool: ${name}`);

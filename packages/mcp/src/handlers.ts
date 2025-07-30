@@ -5,11 +5,22 @@ import { CodeContext, COLLECTION_LIMIT_MESSAGE } from "@zilliz/code-context-core
 import { SnapshotManager } from "./snapshot.js";
 import { ensureAbsolutePath, truncateContent, trackCodebasePath } from "./utils.js";
 
+interface IndexingProgress {
+    path: string;
+    phase: string;
+    current: number;
+    total: number;
+    percentage: number;
+    startTime: number;
+    lastUpdated: number;
+}
+
 export class ToolHandlers {
     private codeContext: CodeContext;
     private snapshotManager: SnapshotManager;
     private indexingStats: { indexedFiles: number; totalChunks: number } | null = null;
     private currentWorkspace: string;
+    private indexingProgress: Map<string, IndexingProgress> = new Map(); // Track progress for each codebase
 
     constructor(codeContext: CodeContext, snapshotManager: SnapshotManager) {
         this.codeContext = codeContext;
@@ -648,6 +659,119 @@ export class ToolHandlers {
                 content: [{
                     type: "text",
                     text: `Error clearing index: ${errorMessage}`
+                }],
+                isError: true
+            };
+        }
+    }
+
+    public async handleGetIndexingStatus(args: any) {
+        const { path: codebasePath } = args;
+
+        try {
+            if (codebasePath) {
+                // Get status for specific codebase
+                const absolutePath = ensureAbsolutePath(codebasePath);
+                
+                if (!fs.existsSync(absolutePath)) {
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `Error: Path '${absolutePath}' does not exist. Original input: '${codebasePath}'`
+                        }],
+                        isError: true
+                    };
+                }
+
+                const isIndexed = this.snapshotManager.getIndexedCodebases().includes(absolutePath);
+                const isIndexing = this.snapshotManager.getIndexingCodebases().includes(absolutePath);
+                const progress = this.indexingProgress.get(absolutePath);
+
+                if (isIndexed) {
+                    const stats = this.indexingStats ? ` (${this.indexingStats.indexedFiles} files, ${this.indexingStats.totalChunks} chunks)` : '';
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `Codebase '${absolutePath}' is fully indexed${stats}.`
+                        }]
+                    };
+                } else if (isIndexing) {
+                    if (progress) {
+                        const elapsed = Date.now() - progress.startTime;
+                        const elapsedSeconds = Math.round(elapsed / 1000);
+                        const estimatedTotal = progress.percentage > 0 ? (elapsed / progress.percentage) * 100 : 0;
+                        const estimatedRemaining = Math.max(0, estimatedTotal - elapsed);
+                        const remainingSeconds = Math.round(estimatedRemaining / 1000);
+
+                        return {
+                            content: [{
+                                type: "text",
+                                text: `Codebase '${absolutePath}' is being indexed:\n` +
+                                      `• Phase: ${progress.phase}\n` +
+                                      `• Progress: ${progress.percentage}% (${progress.current}/${progress.total})\n` +
+                                      `• Elapsed: ${elapsedSeconds}s\n` +
+                                      `• Estimated remaining: ${remainingSeconds}s\n` +
+                                      `• Last updated: ${new Date(progress.lastUpdated).toLocaleTimeString()}`
+                            }]
+                        };
+                    } else {
+                        return {
+                            content: [{
+                                type: "text",
+                                text: `Codebase '${absolutePath}' is preparing to index...`
+                            }]
+                        };
+                    }
+                } else {
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `Codebase '${absolutePath}' is not indexed.`
+                        }]
+                    };
+                }
+            } else {
+                // Get status for all codebases
+                const indexed = this.snapshotManager.getIndexedCodebases();
+                const indexing = this.snapshotManager.getIndexingCodebases();
+                
+                if (indexed.length === 0 && indexing.length === 0) {
+                    return {
+                        content: [{
+                            type: "text",
+                            text: "No codebases are currently indexed or being indexed."
+                        }]
+                    };
+                }
+
+                let statusText = "";
+                if (indexed.length > 0) {
+                    statusText += `Indexed codebases:\n• ${indexed.join('\n• ')}\n\n`;
+                }
+                if (indexing.length > 0) {
+                    statusText += `Indexing codebases:\n`;
+                    for (const p of indexing) {
+                        const progress = this.indexingProgress.get(p);
+                        if (progress) {
+                            statusText += `• ${p} (${progress.percentage}% - ${progress.phase})\n`;
+                        } else {
+                            statusText += `• ${p} (preparing to index...)\n`;
+                        }
+                    }
+                }
+
+                return {
+                    content: [{
+                        type: "text",
+                        text: statusText.trim()
+                    }]
+                };
+            }
+        } catch (error: any) {
+            return {
+                content: [{
+                    type: "text",
+                    text: `Error getting indexing status: ${error.message || error}`
                 }],
                 isError: true
             };

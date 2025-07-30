@@ -61,3 +61,6 @@ Thumbs.db
 CLAUDE.md
 
 .cursor/*
+
+# Local sync scripts
+sync_upstream.sh
