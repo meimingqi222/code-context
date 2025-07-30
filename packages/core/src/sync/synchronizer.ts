@@ -10,13 +10,15 @@ export class FileSynchronizer {
     private rootDir: string;
     private snapshotPath: string;
     private ignorePatterns: string[];
+    private supportedExtensions: string[];
 
-    constructor(rootDir: string, ignorePatterns: string[] = []) {
+    constructor(rootDir: string, ignorePatterns: string[] = [], supportedExtensions: string[] = []) {
         this.rootDir = rootDir;
         this.snapshotPath = this.getSnapshotPath(rootDir);
         this.fileHashes = new Map();
         this.merkleDAG = new MerkleDAG();
         this.ignorePatterns = ignorePatterns;
+        this.supportedExtensions = supportedExtensions;
     }
 
     private getSnapshotPath(codebasePath: string): string {
@@ -35,8 +37,40 @@ export class FileSynchronizer {
         if (stat.isDirectory()) {
             throw new Error(`Attempted to hash a directory: ${filePath}`);
         }
-        const content = await fs.readFile(filePath, 'utf-8');
-        return crypto.createHash('sha256').update(content).digest('hex');
+        
+        // Skip files larger than 2GB to avoid memory issues
+        const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2GB
+        if (stat.size > MAX_FILE_SIZE) {
+            throw new Error(`File size (${stat.size}) is greater than 2 GiB`);
+        }
+        
+        // For binary files or very large files, use streaming hash
+        if (stat.size > 50 * 1024 * 1024) { // 50MB threshold for streaming
+            return this.hashFileStream(filePath);
+        }
+        
+        try {
+            const content = await fs.readFile(filePath, 'utf-8');
+            return crypto.createHash('sha256').update(content).digest('hex');
+        } catch (error: any) {
+            // If UTF-8 reading fails, try streaming hash for binary files
+            if (error.code === 'EISDIR' || error.message.includes('invalid byte sequence')) {
+                return this.hashFileStream(filePath);
+            }
+            throw error;
+        }
+    }
+    
+    private async hashFileStream(filePath: string): Promise<string> {
+        const { createReadStream } = require('fs');
+        const hash = crypto.createHash('sha256');
+        
+        return new Promise((resolve, reject) => {
+            const stream = createReadStream(filePath);
+            stream.on('data', (data: Buffer) => hash.update(data));
+            stream.on('end', () => resolve(hash.digest('hex')));
+            stream.on('error', reject);
+        });
     }
 
     private async generateFileHashes(dir: string): Promise<Map<string, string>> {
@@ -81,12 +115,16 @@ export class FileSynchronizer {
             } else if (stat.isFile()) {
                 // Verify it's really a file and not ignored
                 if (!this.shouldIgnore(relativePath, false)) {
-                    try {
-                        const hash = await this.hashFile(fullPath);
-                        fileHashes.set(relativePath, hash);
-                    } catch (error: any) {
-                        console.warn(`Cannot hash file ${fullPath}: ${error.message}`);
-                        continue;
+                    // Only track files with supported extensions
+                    const ext = path.extname(entry.name);
+                    if (this.supportedExtensions.length === 0 || this.supportedExtensions.includes(ext)) {
+                        try {
+                            const hash = await this.hashFile(fullPath);
+                            fileHashes.set(relativePath, hash);
+                        } catch (error: any) {
+                            console.warn(`Cannot hash file ${fullPath}: ${error.message}`);
+                            continue;
+                        }
                     }
                 }
             }

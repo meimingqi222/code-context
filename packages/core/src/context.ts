@@ -53,8 +53,77 @@ const DEFAULT_IGNORE_PATTERNS = [
 
     // Cache directories
     '.cache/**',
+    'cache/**',
     '__pycache__/**',
     '.pytest_cache/**',
+
+    // Machine Learning and AI model files
+    '*.safetensors',
+    '*.bin',
+    '*.ckpt',
+    '*.pth',
+    '*.pt',
+    '*.h5',
+    '*.pkl',
+    '*.pickle',
+    '*.model',
+    '*.weights',
+    'models/**',
+    'checkpoints/**',
+    'snapshots/**',
+    'huggingface/**',
+    '.huggingface/**',
+
+    // Large data files
+    '*.parquet',
+    '*.arrow',
+    '*.feather',
+    '*.hdf5',
+    '*.h5',
+    '*.npz',
+    '*.npy',
+    '*.csv',  // Can be very large
+    '*.jsonl', // Large JSON lines files
+    '*.tsv',
+    'data/**',
+    'datasets/**',
+
+    // Media files
+    '*.mp4',
+    '*.avi',
+    '*.mov',
+    '*.mkv',
+    '*.mp3',
+    '*.wav',
+    '*.flac',
+    '*.jpg',
+    '*.jpeg',
+    '*.png',
+    '*.gif',
+    '*.bmp',
+    '*.tiff',
+    '*.webp',
+    '*.ico',
+    '*.svg',
+    'images/**',
+    'media/**',
+    'assets/**',
+
+    // Compressed files
+    '*.zip',
+    '*.tar',
+    '*.tar.gz',
+    '*.tgz',
+    '*.rar',
+    '*.7z',
+    '*.bz2',
+    '*.xz',
+
+    // Database files
+    '*.db',
+    '*.sqlite',
+    '*.sqlite3',
+    '*.mdb',
 
     // Logs and temporary files
     'logs/**',
@@ -205,7 +274,7 @@ export class CodeContext {
 
         if (!synchronizer) {
             // To be safe, let's initialize if it's not there.
-            const newSynchronizer = new FileSynchronizer(codebasePath, this.ignorePatterns);
+            const newSynchronizer = new FileSynchronizer(codebasePath, this.ignorePatterns, this.supportedExtensions);
             await newSynchronizer.initialize();
             this.synchronizers.set(collectionName, newSynchronizer);
         }

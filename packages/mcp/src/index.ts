@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+// LOCAL VERSION IDENTIFIER - This helps distinguish local vs npm version
+const LOCAL_VERSION_ID = 'LOCAL-DEV-' + new Date().toISOString().slice(0,10);
+
 // CRITICAL: Redirect console outputs to stderr IMMEDIATELY to avoid interfering with MCP JSON protocol
 // Only MCP protocol messages should go to stdout
 const originalConsoleLog = console.log;
@@ -144,6 +147,16 @@ interface CodeContextMcpConfig {
     milvusToken?: string;
 }
 
+interface IndexingProgress {
+    path: string;
+    phase: string;
+    current: number;
+    total: number;
+    percentage: number;
+    startTime: number;
+    lastUpdated: number;
+}
+
 interface CodebaseSnapshot {
     indexedCodebases: string[];
     indexingCodebases: string[];  // List of codebases currently being indexed
@@ -156,6 +169,7 @@ class CodeContextMcpServer {
     private activeCodebasePath: string | null = null;
     private indexedCodebases: string[] = [];
     private indexingCodebases: string[] = [];  // List of codebases currently being indexed
+    private indexingProgress: Map<string, IndexingProgress> = new Map(); // Track progress for each codebase
     private indexingStats: { indexedFiles: number; totalChunks: number } | null = null;
     private isSyncing: boolean = false;
     private snapshotFilePath: string;
@@ -379,6 +393,20 @@ class CodeContextMcpServer {
                             required: ["path"]
                         }
                     },
+                    {
+                        name: "get_indexing_status",
+                        description: "Get the current indexing status for a specific codebase or all codebases. Shows progress information including phase, percentage, and estimated time remaining.",
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                path: {
+                                    type: "string",
+                                    description: "Optional path to the codebase directory to check status for. If not provided, shows status for all indexing codebases."
+                                }
+                            },
+                            required: []
+                        }
+                    },
                 ]
             };
         });
@@ -394,6 +422,8 @@ class CodeContextMcpServer {
                     return await this.handleSearchCode(args);
                 case "clear_index":
                     return await this.handleClearIndex(args);
+                case "get_indexing_status":
+                    return await this.handleGetIndexingStatus(args);
 
                 default:
                     throw new Error(`Unknown tool: ${name}`);
@@ -587,11 +617,13 @@ class CodeContextMcpServer {
             const hash = crypto.createHash('md5').update(normalizedPath).digest('hex');
             const collectionName = `code_chunks_${hash.substring(0, 8)}`;
 
-            // Initialize file synchronizer with proper ignore patterns
+            // Initialize file synchronizer with proper ignore patterns and supported extensions
             const { FileSynchronizer } = await import("@zilliz/code-context-core");
             const ignorePatterns = this.codeContext['ignorePatterns'] || [];
+            const supportedExtensions = this.codeContext['supportedExtensions'] || [];
             console.log(`[BACKGROUND-INDEX] Using ignore patterns: ${ignorePatterns.join(', ')}`);
-            const synchronizer = new FileSynchronizer(absolutePath, ignorePatterns);
+            console.log(`[BACKGROUND-INDEX] Using supported extensions: ${supportedExtensions.join(', ')}`);
+            const synchronizer = new FileSynchronizer(absolutePath, ignorePatterns, supportedExtensions);
             await synchronizer.initialize();
 
             // Store synchronizer in the context's internal map
@@ -606,12 +638,38 @@ class CodeContextMcpServer {
             const embeddingProvider = this.codeContext['embedding'];
             console.log(`[BACKGROUND-INDEX] 🧠 Using embedding provider: ${embeddingProvider.getProvider()} with dimension: ${embeddingProvider.getDimension()}`);
 
-            // Start indexing with the appropriate context
+            // Initialize progress tracking
+            const startTime = Date.now();
+            this.indexingProgress.set(absolutePath, {
+                path: absolutePath,
+                phase: 'Starting indexing...',
+                current: 0,
+                total: 100,
+                percentage: 0,
+                startTime: startTime,
+                lastUpdated: startTime
+            });
+
+            // Start indexing with the appropriate context and progress callback
             console.log(`[BACKGROUND-INDEX] 🚀 Beginning codebase indexing process...`);
-            const stats = await contextForThisTask.indexCodebase(absolutePath);
+            const stats = await contextForThisTask.indexCodebase(absolutePath, (progress) => {
+                // Update progress tracking
+                this.indexingProgress.set(absolutePath, {
+                    path: absolutePath,
+                    phase: progress.phase,
+                    current: progress.current,
+                    total: progress.total,
+                    percentage: progress.percentage,
+                    startTime: startTime,
+                    lastUpdated: Date.now()
+                });
+                
+                console.log(`[PROGRESS] ${absolutePath}: ${progress.percentage}% - ${progress.phase} (${progress.current}/${progress.total})`);
+            });
             console.log(`[BACKGROUND-INDEX] ✅ Indexing completed successfully! Files: ${stats.indexedFiles}, Chunks: ${stats.totalChunks}`);
 
-            // Move from indexing to indexed list
+            // Clean up progress tracking and move from indexing to indexed list
+            this.indexingProgress.delete(absolutePath);
             this.indexingCodebases = this.indexingCodebases.filter(path => path !== absolutePath);
             if (!this.indexedCodebases.includes(absolutePath)) {
                 this.indexedCodebases.push(absolutePath);
@@ -630,7 +688,8 @@ class CodeContextMcpServer {
 
         } catch (error: any) {
             console.error(`[BACKGROUND-INDEX] Error during indexing for ${absolutePath}:`, error);
-            // Remove from indexing list on error
+            // Clean up progress tracking and remove from indexing list on error
+            this.indexingProgress.delete(absolutePath);
             this.indexingCodebases = this.indexingCodebases.filter(path => path !== absolutePath);
             this.saveCodebaseSnapshot();
 
@@ -937,13 +996,14 @@ class CodeContextMcpServer {
                 };
             }
 
-            // Remove the cleared codebase from both lists
+            // Remove the cleared codebase from both lists and clean up progress tracking
             this.indexedCodebases = this.indexedCodebases.filter(codebasePath =>
                 codebasePath !== absolutePath
             );
             this.indexingCodebases = this.indexingCodebases.filter(codebasePath =>
                 codebasePath !== absolutePath
             );
+            this.indexingProgress.delete(absolutePath);
 
             // Reset active codebase if it was cleared
             if (this.activeCodebasePath === absolutePath) {
@@ -992,7 +1052,126 @@ class CodeContextMcpServer {
         }
     }
 
+    private async handleGetIndexingStatus(args: any) {
+        const { path: codebasePath } = args;
 
+        try {
+            if (codebasePath) {
+                // Get status for specific codebase
+                const absolutePath = this.ensureAbsolutePath(codebasePath);
+                
+                if (!fs.existsSync(absolutePath)) {
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `Error: Path '${absolutePath}' does not exist. Original input: '${codebasePath}'`
+                        }],
+                        isError: true
+                    };
+                }
+
+                const isIndexed = this.indexedCodebases.includes(absolutePath);
+                const isIndexing = this.indexingCodebases.includes(absolutePath);
+                const progress = this.indexingProgress.get(absolutePath);
+
+                if (isIndexed) {
+                    const stats = this.indexingStats ? ` (${this.indexingStats.indexedFiles} files, ${this.indexingStats.totalChunks} chunks)` : '';
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `Codebase '${absolutePath}' is fully indexed${stats}.`
+                        }]
+                    };
+                } else if (isIndexing) {
+                    if (progress) {
+                        const elapsed = Date.now() - progress.startTime;
+                        const elapsedSeconds = Math.round(elapsed / 1000);
+                        const estimatedTotal = progress.percentage > 0 ? (elapsed / progress.percentage) * 100 : 0;
+                        const estimatedRemaining = Math.max(0, estimatedTotal - elapsed);
+                        const remainingSeconds = Math.round(estimatedRemaining / 1000);
+
+                        return {
+                            content: [{
+                                type: "text",
+                                text: `Codebase '${absolutePath}' is being indexed:\n` +
+                                      `• Phase: ${progress.phase}\n` +
+                                      `• Progress: ${progress.percentage}% (${progress.current}/${progress.total})\n` +
+                                      `• Elapsed: ${elapsedSeconds}s\n` +
+                                      `• Estimated remaining: ${remainingSeconds}s\n` +
+                                      `• Last updated: ${new Date(progress.lastUpdated).toLocaleTimeString()}`
+                            }]
+                        };
+                    } else {
+                        return {
+                            content: [{
+                                type: "text",
+                                text: `Codebase '${absolutePath}' is being indexed (progress information not yet available).`
+                            }]
+                        };
+                    }
+                } else {
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `Codebase '${absolutePath}' is not indexed or being indexed.`
+                        }]
+                    };
+                }
+            } else {
+                // Get status for all codebases
+                if (this.indexedCodebases.length === 0 && this.indexingCodebases.length === 0) {
+                    return {
+                        content: [{
+                            type: "text",
+                            text: "No codebases are currently indexed or being indexed."
+                        }]
+                    };
+                }
+
+                let statusMessage = "**Codebase Status Summary:**\n\n";
+
+                if (this.indexedCodebases.length > 0) {
+                    statusMessage += `**Fully Indexed (${this.indexedCodebases.length}):**\n`;
+                    for (const codebase of this.indexedCodebases) {
+                        const baseName = path.basename(codebase);
+                        statusMessage += `• ${baseName} (${codebase})\n`;
+                    }
+                    statusMessage += "\n";
+                }
+
+                if (this.indexingCodebases.length > 0) {
+                    statusMessage += `**Currently Indexing (${this.indexingCodebases.length}):**\n`;
+                    for (const codebase of this.indexingCodebases) {
+                        const baseName = path.basename(codebase);
+                        const progress = this.indexingProgress.get(codebase);
+                        
+                        if (progress) {
+                            const elapsed = Date.now() - progress.startTime;
+                            const elapsedSeconds = Math.round(elapsed / 1000);
+                            statusMessage += `• ${baseName}: ${progress.percentage}% - ${progress.phase} (${elapsedSeconds}s elapsed)\n`;
+                        } else {
+                            statusMessage += `• ${baseName}: Indexing started\n`;
+                        }
+                    }
+                }
+
+                return {
+                    content: [{
+                        type: "text",
+                        text: statusMessage.trim()
+                    }]
+                };
+            }
+        } catch (error: any) {
+            return {
+                content: [{
+                    type: "text",
+                    text: `Error getting indexing status: ${error.message || error}`
+                }],
+                isError: true
+            };
+        }
+    }
 
     /**
      * Truncate content to specified length
@@ -1171,6 +1350,7 @@ Examples:
 
     // Log configuration summary before starting server
     console.log(`[MCP] 🚀 Starting CodeContext MCP Server`);
+    console.log(`[MCP] 🏠 VERSION: ${LOCAL_VERSION_ID} (Local Development Version)`);
     console.log(`[MCP] Configuration Summary:`);
     console.log(`[MCP]   Server: ${config.name} v${config.version}`);
     console.log(`[MCP]   Embedding Provider: ${config.embeddingProvider}`);
