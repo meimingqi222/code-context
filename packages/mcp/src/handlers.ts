@@ -18,9 +18,11 @@ interface IndexingProgress {
 export class ToolHandlers {
     private codeContext: CodeContext;
     private snapshotManager: SnapshotManager;
+    private indexingProgress = new Map<string, IndexingProgress>();
     private indexingStats: { indexedFiles: number; totalChunks: number } | null = null;
+    // 新增：用于跟踪和取消正在运行的索引任务
+    private activeIndexingTasks = new Map<string, AbortController>();
     private currentWorkspace: string;
-    private indexingProgress: Map<string, IndexingProgress> = new Map(); // Track progress for each codebase
 
     constructor(codeContext: CodeContext, snapshotManager: SnapshotManager) {
         this.codeContext = codeContext;
@@ -29,6 +31,51 @@ export class ToolHandlers {
         console.log(`[WORKSPACE] Current workspace: ${this.currentWorkspace}`);
     }
 
+    /**
+     * 智能检查索引状态：检查当前路径或其父目录是否已被索引
+     * @param targetPath 目标路径
+     * @returns 索引状态信息
+     */
+    private checkIndexingStatus(targetPath: string): { isIndexed: boolean; isIndexing: boolean; indexedPath?: string } {
+        const indexed = this.snapshotManager.getIndexedCodebases();
+        const indexing = this.snapshotManager.getIndexingCodebases();
+        
+        // 首先检查精确匹配
+        if (indexed.includes(targetPath)) {
+            console.log(`[INDEX-CHECK] ✅ Exact match found - '${targetPath}' is indexed`);
+            return { isIndexed: true, isIndexing: false, indexedPath: targetPath };
+        }
+        
+        if (indexing.includes(targetPath)) {
+            console.log(`[INDEX-CHECK] 🔄 Exact match found - '${targetPath}' is being indexed`);
+            return { isIndexed: false, isIndexing: true, indexedPath: targetPath };
+        }
+        
+        // 检查父目录是否已被索引（父目录包含子目录）
+        const normalizedTarget = path.resolve(targetPath);
+        
+        for (const indexedPath of indexed) {
+            const normalizedIndexed = path.resolve(indexedPath);
+            // 检查目标路径是否在已索引的路径下
+            if (normalizedTarget.startsWith(normalizedIndexed + path.sep) || normalizedTarget === normalizedIndexed) {
+                console.log(`[INDEX-CHECK] 📁 Parent directory '${indexedPath}' contains target '${targetPath}'`);
+                return { isIndexed: true, isIndexing: false, indexedPath: indexedPath };
+            }
+        }
+        
+        for (const indexingPath of indexing) {
+            const normalizedIndexing = path.resolve(indexingPath);
+            // 检查目标路径是否在正在索引的路径下
+            if (normalizedTarget.startsWith(normalizedIndexing + path.sep) || normalizedTarget === normalizedIndexing) {
+                console.log(`[INDEX-CHECK] 📁 Parent directory '${indexingPath}' (being indexed) contains target '${targetPath}'`);
+                return { isIndexed: false, isIndexing: true, indexedPath: indexingPath };
+            }
+        }
+        
+        console.log(`[INDEX-CHECK] ❌ No indexed parent found for '${targetPath}'`);
+        return { isIndexed: false, isIndexing: false };
+    }
+    
     /**
      * Sync indexed codebases from Zilliz Cloud collections
      * This method fetches all collections from the vector database,
@@ -226,6 +273,19 @@ export class ToolHandlers {
                 this.snapshotManager.removeIndexedCodebase(absolutePath);
             }
 
+            // 如果是强制重新索引，也需要取消现有的索引任务
+            if (forceReindex && this.activeIndexingTasks.has(absolutePath)) {
+                console.log(`[FORCE-REINDEX] 🛑 Cancelling existing indexing task for force reindex: ${absolutePath}`);
+                const abortController = this.activeIndexingTasks.get(absolutePath);
+                if (abortController) {
+                    abortController.abort();
+                    this.activeIndexingTasks.delete(absolutePath);
+                    console.log(`[FORCE-REINDEX] ✅ Successfully cancelled existing indexing task: ${absolutePath}`);
+                }
+                // 等待一下让旧任务清理完成
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+
             // CRITICAL: Pre-index collection creation validation
             try {
                 const normalizedPath = path.resolve(absolutePath);
@@ -338,6 +398,10 @@ export class ToolHandlers {
     private async startBackgroundIndexing(codebasePath: string, forceReindex: boolean, splitterType: string) {
         const absolutePath = codebasePath;
 
+        // 创建AbortController用于取消任务
+        const abortController = new AbortController();
+        this.activeIndexingTasks.set(absolutePath, abortController);
+
         try {
             console.log(`[BACKGROUND-INDEX] Starting background indexing for: ${absolutePath}`);
 
@@ -376,9 +440,38 @@ export class ToolHandlers {
             const embeddingProvider = this.codeContext['embedding'];
             console.log(`[BACKGROUND-INDEX] 🧠 Using embedding provider: ${embeddingProvider.getProvider()} with dimension: ${embeddingProvider.getDimension()}`);
 
+            // 检查任务是否被取消
+            if (abortController.signal.aborted) {
+                console.log(`[BACKGROUND-INDEX] 🛑 Indexing task was cancelled for: ${absolutePath}`);
+                this.snapshotManager.removeIndexingCodebase(absolutePath);
+                this.snapshotManager.saveCodebaseSnapshot();
+                this.indexingProgress.delete(absolutePath);
+                return;
+            }
+
             // Start indexing with the appropriate context
             console.log(`[BACKGROUND-INDEX] 🚀 Beginning codebase indexing process...`);
-            const stats = await contextForThisTask.indexCodebase(absolutePath);
+            
+            // 创建一个包装的进度回调，用于检查取消状态
+            const progressCallback = (progress: { phase: string; current: number; total: number; percentage: number }) => {
+                if (abortController.signal.aborted) {
+                    console.log(`[BACKGROUND-INDEX] 🛑 Indexing cancelled during progress for: ${absolutePath}`);
+                    throw new Error('Indexing cancelled by user');
+                }
+                
+                // 更新进度信息
+                this.indexingProgress.set(absolutePath, {
+                    path: absolutePath,
+                    phase: progress.phase,
+                    current: progress.current,
+                    total: progress.total,
+                    percentage: progress.percentage,
+                    startTime: this.indexingProgress.get(absolutePath)?.startTime || Date.now(),
+                    lastUpdated: Date.now()
+                });
+            };
+
+            const stats = await contextForThisTask.indexCodebase(absolutePath, progressCallback);
             console.log(`[BACKGROUND-INDEX] ✅ Indexing completed successfully! Files: ${stats.indexedFiles}, Chunks: ${stats.totalChunks}`);
 
             // Move from indexing to indexed list
@@ -396,13 +489,22 @@ export class ToolHandlers {
             console.log(`[BACKGROUND-INDEX] ${message}`);
 
         } catch (error: any) {
-            console.error(`[BACKGROUND-INDEX] Error during indexing for ${absolutePath}:`, error);
-            // Remove from indexing list on error
+            // 检查是否是取消错误
+            if (error.message === 'Indexing cancelled by user' || abortController.signal.aborted) {
+                console.log(`[BACKGROUND-INDEX] 🛑 Indexing was cancelled for: ${absolutePath}`);
+            } else {
+                console.error(`[BACKGROUND-INDEX] Error during indexing for ${absolutePath}:`, error);
+                console.error(`[BACKGROUND-INDEX] Indexing failed for ${absolutePath}: ${error.message || error}`);
+            }
+            
+            // Remove from indexing list on error or cancellation
             this.snapshotManager.removeIndexingCodebase(absolutePath);
             this.snapshotManager.saveCodebaseSnapshot();
-
-            // Log error but don't crash MCP service - indexing errors are handled gracefully
-            console.error(`[BACKGROUND-INDEX] Indexing failed for ${absolutePath}: ${error.message || error}`);
+        } finally {
+            // 清理资源
+            this.activeIndexingTasks.delete(absolutePath);
+            this.indexingProgress.delete(absolutePath);
+            console.log(`[BACKGROUND-INDEX] 🧹 Cleaned up resources for: ${absolutePath}`);
         }
     }
 
@@ -442,9 +544,8 @@ export class ToolHandlers {
 
             trackCodebasePath(absolutePath);
 
-            // Check if this codebase is indexed or being indexed
-            const isIndexed = this.snapshotManager.getIndexedCodebases().includes(absolutePath);
-            const isIndexing = this.snapshotManager.getIndexingCodebases().includes(absolutePath);
+            // 智能检查索引状态：检查当前路径或其父目录是否已被索引
+            const { isIndexed, isIndexing, indexedPath } = this.checkIndexingStatus(absolutePath);
 
             if (!isIndexed && !isIndexing) {
                 return {
@@ -455,6 +556,9 @@ export class ToolHandlers {
                     isError: true
                 };
             }
+
+            // 如果使用的是父目录的索引，需要调整搜索路径
+            const searchPath = indexedPath || absolutePath;
 
             // Show indexing status if codebase is being indexed
             let indexingStatusMessage = '';
@@ -471,20 +575,40 @@ export class ToolHandlers {
             console.log(`[SEARCH] 🧠 Using embedding provider: ${embeddingProvider.getProvider()} for semantic search`);
             console.log(`[SEARCH] 🔍 Generating embeddings for query using ${embeddingProvider.getProvider()}...`);
 
-            // Search in the specified codebase
+            // Search in the specified codebase (using the indexed path if it's a parent directory)
             const searchResults = await this.codeContext.semanticSearch(
-                absolutePath,
+                searchPath,
                 query,
                 Math.min(resultLimit, 50),
                 0.3
             );
+            
+            // 如果使用的是父目录的索引，需要过滤结果以只显示目标路径下的文件
+            let filteredResults = searchResults;
+            if (searchPath !== absolutePath) {
+                const targetRelativePath = path.relative(searchPath, absolutePath);
+                console.log(`[SEARCH] 📊 Filtering results for subdirectory: ${targetRelativePath}`);
+                filteredResults = searchResults.filter(result => {
+                    const resultPath = path.join(searchPath, result.relativePath);
+                    const normalizedResultPath = path.resolve(resultPath);
+                    const normalizedTargetPath = path.resolve(absolutePath);
+                    
+                    // 检查结果文件是否在目标目录下
+                    return normalizedResultPath.startsWith(normalizedTargetPath + path.sep) || 
+                           normalizedResultPath === normalizedTargetPath;
+                });
+                console.log(`[SEARCH] 📋 Filtered ${searchResults.length} to ${filteredResults.length} results for target directory`);
+            }
 
-            console.log(`[SEARCH] ✅ Search completed! Found ${searchResults.length} results using ${embeddingProvider.getProvider()} embeddings`);
+            console.log(`[SEARCH] ✅ Search completed! Found ${filteredResults.length} relevant results using ${embeddingProvider.getProvider()} embeddings`);
 
-            if (searchResults.length === 0) {
+            if (filteredResults.length === 0) {
                 let noResultsMessage = `No results found for query: "${query}" in codebase '${absolutePath}'`;
                 if (isIndexing) {
                     noResultsMessage += `\n\nNote: This codebase is still being indexed. Try searching again after indexing completes, or the query may not match any indexed content.`;
+                }
+                if (searchPath !== absolutePath) {
+                    noResultsMessage += `\n\nNote: Searched in parent directory '${searchPath}' but no results were found within the target subdirectory '${absolutePath}'.`;
                 }
                 return {
                     content: [{
@@ -494,8 +618,8 @@ export class ToolHandlers {
                 };
             }
 
-            // Format results
-            const formattedResults = searchResults.map((result: any, index: number) => {
+            // Format results (use filtered results)
+            const formattedResults = filteredResults.map((result: any, index: number) => {
                 const location = `${result.relativePath}:${result.startLine}-${result.endLine}`;
                 const context = truncateContent(result.content, 5000);
                 const codebaseInfo = path.basename(absolutePath);
@@ -506,7 +630,11 @@ export class ToolHandlers {
                     `   Context: \n\`\`\`${result.language}\n${context}\n\`\`\`\n`;
             }).join('\n');
 
-            let resultMessage = `Found ${searchResults.length} results for query: "${query}" in codebase '${absolutePath}'${indexingStatusMessage}\n\n${formattedResults}`;
+            let resultMessage = `Found ${filteredResults.length} results for query: "${query}" in codebase '${absolutePath}'${indexingStatusMessage}`;
+            if (searchPath !== absolutePath) {
+                resultMessage += `\n\n📁 **Note**: Using index from parent directory '${searchPath}' to search within '${absolutePath}'`;
+            }
+            resultMessage += `\n\n${formattedResults}`;
 
             if (isIndexing) {
                 resultMessage += `\n\n💡 **Tip**: This codebase is still being indexed. More results may become available as indexing progresses.`;
@@ -599,6 +727,17 @@ export class ToolHandlers {
 
             console.log(`[CLEAR] Clearing codebase: ${absolutePath}`);
 
+            // 检查是否有正在运行的索引任务，如果有则取消
+            if (this.activeIndexingTasks.has(absolutePath)) {
+                console.log(`[CLEAR] 🛑 Cancelling active indexing task for: ${absolutePath}`);
+                const abortController = this.activeIndexingTasks.get(absolutePath);
+                if (abortController) {
+                    abortController.abort();
+                    this.activeIndexingTasks.delete(absolutePath);
+                    console.log(`[CLEAR] ✅ Successfully cancelled indexing task for: ${absolutePath}`);
+                }
+            }
+
             try {
                 await this.codeContext.clearIndex(absolutePath);
                 console.log(`[CLEAR] Successfully cleared index for: ${absolutePath}`);
@@ -617,6 +756,9 @@ export class ToolHandlers {
             // Remove the cleared codebase from both lists
             this.snapshotManager.removeIndexedCodebase(absolutePath);
             this.snapshotManager.removeIndexingCodebase(absolutePath);
+
+            // 清理进度信息
+            this.indexingProgress.delete(absolutePath);
 
             // Reset indexing stats if this was the active codebase
             this.indexingStats = null;
