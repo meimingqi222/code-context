@@ -167,6 +167,19 @@ You can set the embedding batch size to optimize the performance of the MCP serv
 EMBEDDING_BATCH_SIZE=512
 ```
 
+#### Custom File Processing (Optional)
+You can configure custom file extensions and ignore patterns globally via environment variables:
+
+```bash
+# Additional file extensions to include beyond defaults
+CUSTOM_EXTENSIONS=.vue,.svelte,.astro,.twig
+
+# Additional ignore patterns to exclude files/directories
+CUSTOM_IGNORE_PATTERNS=temp/**,*.backup,private/**,uploads/**
+```
+
+These settings work in combination with tool parameters - patterns from both sources will be merged together.
+
 ## Usage with MCP Clients
 
 
@@ -533,6 +546,9 @@ Index a codebase directory for semantic search.
 **Parameters:**
 - `path` (required): **ABSOLUTE** path to the codebase directory to index (e.g., `/Users/username/project`). Use the project root directory, NOT relative paths.
 - `force` (optional): Force re-indexing even if already indexed (default: false)
+- `splitter` (optional): Code splitter to use - 'ast' for syntax-aware splitting with automatic fallback, 'langchain' for character-based splitting (default: "ast")
+- `customExtensions` (optional): Additional file extensions to include beyond defaults (e.g., ['.vue', '.svelte', '.astro']). Extensions should include the dot prefix or will be automatically added (default: [])
+- `ignorePatterns` (optional): Additional ignore patterns to exclude specific files/directories beyond defaults (e.g., ['static/**', '*.tmp', 'private/**']) (default: [])
 
 ### 2. `search_code`
 Search the indexed codebase using natural language queries.
@@ -543,10 +559,10 @@ Search the indexed codebase using natural language queries.
 - `limit` (optional): Maximum number of results to return (default: 10, max: 50)
 
 ### 3. `clear_index`
-Clear the search index.
+Clear the search index for a specific codebase.
 
 **Parameters:**
-- `confirm` (required): Confirmation flag to prevent accidental clearing
+- `path` (required): Absolute path to the codebase directory to clear index for
 
 
 ## Contributing

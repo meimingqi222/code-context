@@ -158,6 +158,8 @@ export interface CodeContextConfig {
     codeSplitter?: Splitter;
     supportedExtensions?: string[];
     ignorePatterns?: string[];
+    customExtensions?: string[]; // New: custom extensions from MCP
+    customIgnorePatterns?: string[]; // New: custom ignore patterns from MCP
 }
 
 export class CodeContext {
@@ -183,8 +185,39 @@ export class CodeContext {
 
         this.codeSplitter = config.codeSplitter || new AstCodeSplitter(2500, 300);
 
-        this.supportedExtensions = config.supportedExtensions || DEFAULT_SUPPORTED_EXTENSIONS;
-        this.ignorePatterns = config.ignorePatterns || DEFAULT_IGNORE_PATTERNS;
+        // Load custom extensions from environment variables
+        const envCustomExtensions = this.getCustomExtensionsFromEnv();
+
+        // Combine default extensions with config extensions and env extensions
+        const allSupportedExtensions = [
+            ...DEFAULT_SUPPORTED_EXTENSIONS,
+            ...(config.supportedExtensions || []),
+            ...(config.customExtensions || []),
+            ...envCustomExtensions
+        ];
+        // Remove duplicates
+        this.supportedExtensions = [...new Set(allSupportedExtensions)];
+
+        // Load custom ignore patterns from environment variables  
+        const envCustomIgnorePatterns = this.getCustomIgnorePatternsFromEnv();
+
+        // Start with default ignore patterns
+        const allIgnorePatterns = [
+            ...DEFAULT_IGNORE_PATTERNS,
+            ...(config.ignorePatterns || []),
+            ...(config.customIgnorePatterns || []),
+            ...envCustomIgnorePatterns
+        ];
+        // Remove duplicates
+        this.ignorePatterns = [...new Set(allIgnorePatterns)];
+
+        console.log(`🔧 Initialized with ${this.supportedExtensions.length} supported extensions and ${this.ignorePatterns.length} ignore patterns`);
+        if (envCustomExtensions.length > 0) {
+            console.log(`📎 Loaded ${envCustomExtensions.length} custom extensions from environment: ${envCustomExtensions.join(', ')}`);
+        }
+        if (envCustomIgnorePatterns.length > 0) {
+            console.log(`🚫 Loaded ${envCustomIgnorePatterns.length} custom ignore patterns from environment: ${envCustomIgnorePatterns.join(', ')}`);
+        }
     }
 
     /**
@@ -273,6 +306,9 @@ export class CodeContext {
         const synchronizer = this.synchronizers.get(collectionName);
 
         if (!synchronizer) {
+            // Load project-specific ignore patterns before creating FileSynchronizer
+            await this.loadGitignorePatterns(codebasePath);
+            
             // To be safe, let's initialize if it's not there.
             const newSynchronizer = new FileSynchronizer(codebasePath, this.ignorePatterns, this.supportedExtensions);
             await newSynchronizer.initialize();
@@ -332,9 +368,11 @@ export class CodeContext {
     }
 
     private async deleteFileChunks(collectionName: string, relativePath: string): Promise<void> {
+        // Escape backslashes for Milvus query expression (Windows path compatibility)
+        const escapedPath = relativePath.replace(/\\/g, '\\\\');
         const results = await this.vectorDatabase.query(
             collectionName,
-            `relativePath == "${relativePath}"`,
+            `relativePath == "${escapedPath}"`,
             ['id']
         );
 
@@ -921,6 +959,74 @@ export class CodeContext {
 
         const regex = new RegExp(`^${regexPattern}$`);
         return regex.test(text);
+    }
+
+    /**
+     * Get custom extensions from environment variables
+     * Supports CUSTOM_EXTENSIONS as comma-separated list
+     * @returns Array of custom extensions
+     */
+    private getCustomExtensionsFromEnv(): string[] {
+        const envExtensions = envManager.get('CUSTOM_EXTENSIONS');
+        if (!envExtensions) {
+            return [];
+        }
+
+        try {
+            const extensions = envExtensions
+                .split(',')
+                .map(ext => ext.trim())
+                .filter(ext => ext.length > 0)
+                .map(ext => ext.startsWith('.') ? ext : `.${ext}`); // Ensure extensions start with dot
+
+            return extensions;
+        } catch (error) {
+            console.warn(`⚠️  Failed to parse CUSTOM_EXTENSIONS: ${error}`);
+            return [];
+        }
+    }
+
+    /**
+     * Get custom ignore patterns from environment variables  
+     * Supports CUSTOM_IGNORE_PATTERNS as comma-separated list
+     * @returns Array of custom ignore patterns
+     */
+    private getCustomIgnorePatternsFromEnv(): string[] {
+        const envIgnorePatterns = envManager.get('CUSTOM_IGNORE_PATTERNS');
+        if (!envIgnorePatterns) {
+            return [];
+        }
+
+        try {
+            const patterns = envIgnorePatterns
+                .split(',')
+                .map(pattern => pattern.trim())
+                .filter(pattern => pattern.length > 0);
+
+            return patterns;
+        } catch (error) {
+            console.warn(`⚠️  Failed to parse CUSTOM_IGNORE_PATTERNS: ${error}`);
+            return [];
+        }
+    }
+
+    /**
+     * Add custom extensions (from MCP or other sources) without replacing existing ones
+     * @param customExtensions Array of custom extensions to add
+     */
+    addCustomExtensions(customExtensions: string[]): void {
+        if (customExtensions.length === 0) return;
+
+        // Ensure extensions start with dot
+        const normalizedExtensions = customExtensions.map(ext =>
+            ext.startsWith('.') ? ext : `.${ext}`
+        );
+
+        // Merge current extensions with new custom extensions, avoiding duplicates
+        const mergedExtensions = [...this.supportedExtensions, ...normalizedExtensions];
+        const uniqueExtensions: string[] = [...new Set(mergedExtensions)];
+        this.supportedExtensions = uniqueExtensions;
+        console.log(`📎 Added ${customExtensions.length} custom extensions. Total: ${this.supportedExtensions.length} extensions`);
     }
 
     /**
