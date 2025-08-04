@@ -27,16 +27,16 @@ import { MilvusVectorDatabase } from "@zilliz/code-context-core";
 // Import our modular components
 import { createMcpConfig, logConfigurationSummary, showHelpMessage, CodeContextMcpConfig } from "./config.js";
 import { createEmbeddingInstance, logEmbeddingProviderInfo } from "./embedding.js";
+import { SharedStateManager } from "./shared-state.js";
 import { SnapshotManager } from "./snapshot.js";
-import { SyncManager } from "./sync.js";
-import { ToolHandlers } from "./handlers.js";
+import { HybridToolHandlers } from "./hybrid-handlers.js";
 
 class CodeContextMcpServer {
     private server: Server;
     private codeContext: CodeContext;
+    private sharedStateManager: SharedStateManager;
     private snapshotManager: SnapshotManager;
-    private syncManager: SyncManager;
-    private toolHandlers: ToolHandlers;
+    private toolHandlers: HybridToolHandlers;
 
     constructor(config: CodeContextMcpConfig) {
         // Initialize MCP server
@@ -72,12 +72,16 @@ class CodeContextMcpServer {
         });
 
         // Initialize managers
+        this.sharedStateManager = new SharedStateManager();
         this.snapshotManager = new SnapshotManager();
-        this.syncManager = new SyncManager(this.codeContext, this.snapshotManager);
-        this.toolHandlers = new ToolHandlers(this.codeContext, this.snapshotManager);
-
-        // Load existing codebase snapshot on startup
+        this.toolHandlers = new HybridToolHandlers(this.codeContext, this.sharedStateManager, this.snapshotManager);
+        
+        // Load existing codebase snapshot for MCP independent mode
         this.snapshotManager.loadCodebaseSnapshot();
+
+        // Log initial shared state
+        console.log('[SHARED-STATE] Initial state loaded');
+        console.log(this.sharedStateManager.getStatusReport());
 
         this.setupTools();
     }
@@ -228,20 +232,22 @@ Search the indexed codebase using natural language queries within a specified ab
     }
 
     async start() {
-        console.log('[SYNC-DEBUG] MCP server start() method called');
+        console.log('[MCP-SERVER] MCP server start() method called');
         console.log('Starting CodeContext MCP server...');
 
         const transport = new StdioServerTransport();
-        console.log('[SYNC-DEBUG] StdioServerTransport created, attempting server connection...');
+        console.log('[MCP-SERVER] StdioServerTransport created, attempting server connection...');
 
         await this.server.connect(transport);
         console.log("MCP server started and listening on stdio.");
-        console.log('[SYNC-DEBUG] Server connection established successfully');
-
-        // Start background sync after server is connected
-        console.log('[SYNC-DEBUG] Initializing background sync...');
-        this.syncManager.startBackgroundSync();
-        console.log('[SYNC-DEBUG] MCP server initialization complete');
+        console.log('[MCP-SERVER] Server connection established successfully');
+        
+        // Setup state change monitoring
+        this.sharedStateManager.onStateChange((state) => {
+            console.log('[SHARED-STATE] State updated:', state.indexes.length, 'indexed,', state.activeIndexing.length, 'indexing');
+        });
+        
+        console.log('[MCP-SERVER] MCP server initialization complete');
     }
 }
 

@@ -5,14 +5,15 @@ import { SearchCommand } from './commands/searchCommand';
 import { IndexCommand } from './commands/indexCommand';
 import { SyncCommand } from './commands/syncCommand';
 import { ConfigManager } from './config/configManager';
+import { IndexManager } from './indexing/indexManager';
 import { CodeContext, OpenAIEmbedding, VoyageAIEmbedding, GeminiEmbedding, MilvusRestfulVectorDatabase, AstCodeSplitter, LangChainCodeSplitter, SplitterType } from '@zilliz/code-context-core';
 import { envManager } from '@zilliz/code-context-core';
 
 let semanticSearchProvider: SemanticSearchViewProvider;
 let searchCommand: SearchCommand;
-let indexCommand: IndexCommand;
 let syncCommand: SyncCommand;
 let configManager: ConfigManager;
+let indexManager: IndexManager;
 let codeContext: CodeContext;
 let autoSyncDisposable: vscode.Disposable | null = null;
 
@@ -25,10 +26,13 @@ export async function activate(context: vscode.ExtensionContext) {
     // Initialize shared codeContext instance with embedding configuration
     codeContext = createCodeContextWithConfig(configManager);
 
+    // Initialize the new unified index manager
+    indexManager = new IndexManager(context, codeContext);
+    
     // Initialize providers and commands
     searchCommand = new SearchCommand(codeContext);
-    indexCommand = new IndexCommand(codeContext);
     syncCommand = new SyncCommand(codeContext);
+    const indexCommand = new IndexCommand(codeContext);
     semanticSearchProvider = new SemanticSearchViewProvider(context.extensionUri, searchCommand, indexCommand, syncCommand, configManager);
 
     // Register command handlers
@@ -58,8 +62,24 @@ export async function activate(context: vscode.ExtensionContext) {
             const selectedText = editor?.document.getText(editor.selection);
             return searchCommand.execute(selectedText);
         }),
-        vscode.commands.registerCommand('semanticCodeSearch.indexCodebase', () => indexCommand.execute()),
-        vscode.commands.registerCommand('semanticCodeSearch.clearIndex', () => indexCommand.clearIndex()),
+        vscode.commands.registerCommand('semanticCodeSearch.indexCodebase', () => {
+            // Use workspace folder as default path
+            const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (workspacePath) {
+                return indexManager.indexCodebase(workspacePath);
+            } else {
+                vscode.window.showErrorMessage('No workspace folder found. Please open a folder first.');
+            }
+        }),
+        vscode.commands.registerCommand('semanticCodeSearch.clearIndex', () => {
+            // Use workspace folder as default path
+            const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (workspacePath) {
+                return indexManager.clearIndex(workspacePath);
+            } else {
+                vscode.window.showErrorMessage('No workspace folder found. Please open a folder first.');
+            }
+        }),
         vscode.commands.registerCommand('semanticCodeSearch.reloadConfiguration', () => reloadCodeContextConfiguration())
     ];
 
@@ -227,7 +247,6 @@ function reloadCodeContextConfiguration() {
 
         // Update command instances with new codeContext
         searchCommand.updateCodeContext(codeContext);
-        indexCommand.updateCodeContext(codeContext);
         syncCommand.updateCodeContext(codeContext);
 
         // Restart auto-sync if it was enabled
