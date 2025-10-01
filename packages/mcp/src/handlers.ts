@@ -3,7 +3,7 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { Context, COLLECTION_LIMIT_MESSAGE } from "@zilliz/claude-context-core";
 import { SnapshotManager } from "./snapshot.js";
-import { ensureAbsolutePath, truncateContent, trackCodebasePath } from "./utils.js";
+import { ensureAbsolutePath, truncateContent, trackCodebasePath, isPathIndexedOrNested } from "./utils.js";
 
 export class ToolHandlers {
     private context: Context;
@@ -16,6 +16,21 @@ export class ToolHandlers {
         this.snapshotManager = snapshotManager;
         this.currentWorkspace = process.cwd();
         console.log(`[WORKSPACE] Current workspace: ${this.currentWorkspace}`);
+    }
+
+    /**
+     * Find the parent directory that is actually indexed for a given subdirectory
+     */
+    private findIndexedParentPath(searchPath: string): string | null {
+        const indexedCodebases = this.snapshotManager.getIndexedCodebases();
+
+        for (const indexedPath of indexedCodebases) {
+            if (isPathIndexedOrNested(searchPath, [indexedPath])) {
+                return indexedPath;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -447,9 +462,12 @@ export class ToolHandlers {
 
             trackCodebasePath(absolutePath);
 
-            // Check if this codebase is indexed or being indexed
-            const isIndexed = this.snapshotManager.getIndexedCodebases().includes(absolutePath);
-            const isIndexing = this.snapshotManager.getIndexingCodebases().includes(absolutePath);
+            // Check if this codebase is indexed or being indexed (including parent directories)
+            const indexedCodebases = this.snapshotManager.getIndexedCodebases();
+            const indexingCodebases = this.snapshotManager.getIndexingCodebases();
+
+            const isIndexed = isPathIndexedOrNested(absolutePath, indexedCodebases);
+            const isIndexing = isPathIndexedOrNested(absolutePath, indexingCodebases);
 
             if (!isIndexed && !isIndexing) {
                 return {
@@ -463,11 +481,19 @@ export class ToolHandlers {
 
             // Show indexing status if codebase is being indexed
             let indexingStatusMessage = '';
+            const actualIndexedPath = this.findIndexedParentPath(absolutePath);
+            const searchTargetPath = actualIndexedPath || absolutePath;
+
             if (isIndexing) {
-                indexingStatusMessage = `\n⚠️  **Indexing in Progress**: This codebase is currently being indexed in the background. Search results may be incomplete until indexing completes.`;
+                if (actualIndexedPath && actualIndexedPath !== absolutePath) {
+                    indexingStatusMessage = `\n⚠️  **Indexing in Progress**: This codebase is being indexed through parent directory '${actualIndexedPath}'. Search results may be incomplete until indexing completes.`;
+                } else {
+                    indexingStatusMessage = `\n⚠️  **Indexing in Progress**: This codebase is currently being indexed in the background. Search results may be incomplete until indexing completes.`;
+                }
             }
 
             console.log(`[SEARCH] Searching in codebase: ${absolutePath}`);
+            console.log(`[SEARCH] Actual search target (indexed directory): ${searchTargetPath}`);
             console.log(`[SEARCH] Query: "${query}"`);
             console.log(`[SEARCH] Indexing status: ${isIndexing ? 'In Progress' : 'Completed'}`);
 
@@ -494,9 +520,9 @@ export class ToolHandlers {
                 filterExpr = `fileExtension in [${quoted}]`;
             }
 
-            // Search in the specified codebase
+            // Search in the actual indexed codebase (may be parent directory)
             const searchResults = await this.context.semanticSearch(
-                absolutePath,
+                searchTargetPath,
                 query,
                 Math.min(resultLimit, 50),
                 0.3,
@@ -507,6 +533,9 @@ export class ToolHandlers {
 
             if (searchResults.length === 0) {
                 let noResultsMessage = `No results found for query: "${query}" in codebase '${absolutePath}'`;
+                if (actualIndexedPath && actualIndexedPath !== absolutePath) {
+                    noResultsMessage += ` (searched through indexed parent directory '${actualIndexedPath}')`;
+                }
                 if (isIndexing) {
                     noResultsMessage += `\n\nNote: This codebase is still being indexed. Try searching again after indexing completes, or the query may not match any indexed content.`;
                 }
@@ -522,7 +551,7 @@ export class ToolHandlers {
             const formattedResults = searchResults.map((result: any, index: number) => {
                 const location = `${result.relativePath}:${result.startLine}-${result.endLine}`;
                 const context = truncateContent(result.content, 5000);
-                const codebaseInfo = path.basename(absolutePath);
+                const codebaseInfo = path.basename(searchTargetPath);
 
                 return `${index + 1}. Code snippet (${result.language}) [${codebaseInfo}]\n` +
                     `   Location: ${location}\n` +
@@ -530,7 +559,11 @@ export class ToolHandlers {
                     `   Context: \n\`\`\`${result.language}\n${context}\n\`\`\`\n`;
             }).join('\n');
 
-            let resultMessage = `Found ${searchResults.length} results for query: "${query}" in codebase '${absolutePath}'${indexingStatusMessage}\n\n${formattedResults}`;
+            let resultMessage = `Found ${searchResults.length} results for query: "${query}" in codebase '${absolutePath}'`;
+            if (actualIndexedPath && actualIndexedPath !== absolutePath) {
+                resultMessage += ` (searched through indexed parent directory '${actualIndexedPath}')`;
+            }
+            resultMessage += `${indexingStatusMessage}\n\n${formattedResults}`;
 
             if (isIndexing) {
                 resultMessage += `\n\n💡 **Tip**: This codebase is still being indexed. More results may become available as indexing progresses.`;
@@ -607,9 +640,12 @@ export class ToolHandlers {
                 };
             }
 
-            // Check if this codebase is indexed or being indexed
-            const isIndexed = this.snapshotManager.getIndexedCodebases().includes(absolutePath);
-            const isIndexing = this.snapshotManager.getIndexingCodebases().includes(absolutePath);
+            // Check if this codebase is indexed or being indexed (including parent directories)
+            const indexedCodebases = this.snapshotManager.getIndexedCodebases();
+            const indexingCodebases = this.snapshotManager.getIndexingCodebases();
+
+            const isIndexed = isPathIndexedOrNested(absolutePath, indexedCodebases);
+            const isIndexing = isPathIndexedOrNested(absolutePath, indexingCodebases);
 
             if (!isIndexed && !isIndexing) {
                 return {
@@ -718,9 +754,35 @@ export class ToolHandlers {
                 };
             }
 
-            // Check indexing status using new status system
-            const status = this.snapshotManager.getCodebaseStatus(absolutePath);
-            const info = this.snapshotManager.getCodebaseInfo(absolutePath);
+            // Check indexing status using new status system (including parent directories)
+            let status = this.snapshotManager.getCodebaseStatus(absolutePath);
+            let info = this.snapshotManager.getCodebaseInfo(absolutePath);
+
+            // If not found directly, check if this is a subdirectory of an indexed codebase
+            if (status === 'not_found') {
+                const indexedCodebases = this.snapshotManager.getIndexedCodebases();
+                const indexingCodebases = this.snapshotManager.getIndexingCodebases();
+
+                for (const indexedPath of indexedCodebases) {
+                    if (isPathIndexedOrNested(absolutePath, [indexedPath])) {
+                        status = 'indexed';
+                        info = this.snapshotManager.getCodebaseInfo(indexedPath);
+                        console.log(`[STATUS] Found parent indexed directory: ${indexedPath} for subdirectory: ${absolutePath}`);
+                        break;
+                    }
+                }
+
+                if (status === 'not_found') {
+                    for (const indexingPath of indexingCodebases) {
+                        if (isPathIndexedOrNested(absolutePath, [indexingPath])) {
+                            status = 'indexing';
+                            info = this.snapshotManager.getCodebaseInfo(indexingPath);
+                            console.log(`[STATUS] Found parent indexing directory: ${indexingPath} for subdirectory: ${absolutePath}`);
+                            break;
+                        }
+                    }
+                }
+            }
 
             let statusMessage = '';
 
@@ -728,7 +790,15 @@ export class ToolHandlers {
                 case 'indexed':
                     if (info && 'indexedFiles' in info) {
                         const indexedInfo = info as any;
-                        statusMessage = `✅ Codebase '${absolutePath}' is fully indexed and ready for search.`;
+                        const isParentIndexed = info && this.snapshotManager.getCodebaseStatus(absolutePath) === 'not_found';
+                        const actualIndexedPath = this.findIndexedParentPath(absolutePath);
+
+                        if (isParentIndexed && actualIndexedPath) {
+                            statusMessage = `✅ Codebase '${absolutePath}' is searchable through parent directory '${actualIndexedPath}'.`;
+                        } else {
+                            statusMessage = `✅ Codebase '${absolutePath}' is fully indexed and ready for search.`;
+                        }
+
                         statusMessage += `\n📊 Statistics: ${indexedInfo.indexedFiles} files, ${indexedInfo.totalChunks} chunks`;
                         statusMessage += `\n📅 Status: ${indexedInfo.indexStatus}`;
                         statusMessage += `\n🕐 Last updated: ${new Date(indexedInfo.lastUpdated).toLocaleString()}`;
@@ -741,7 +811,14 @@ export class ToolHandlers {
                     if (info && 'indexingPercentage' in info) {
                         const indexingInfo = info as any;
                         const progressPercentage = indexingInfo.indexingPercentage || 0;
-                        statusMessage = `🔄 Codebase '${absolutePath}' is currently being indexed. Progress: ${progressPercentage.toFixed(1)}%`;
+                        const actualIndexPath = this.findIndexedParentPath(absolutePath);
+                        const isParentIndexing = actualIndexPath && actualIndexPath !== absolutePath;
+
+                        if (isParentIndexing) {
+                            statusMessage = `🔄 Codebase '${absolutePath}' is being indexed through parent directory '${actualIndexPath}'. Progress: ${progressPercentage.toFixed(1)}%`;
+                        } else {
+                            statusMessage = `🔄 Codebase '${absolutePath}' is currently being indexed. Progress: ${progressPercentage.toFixed(1)}%`;
+                        }
 
                         // Add more detailed status based on progress
                         if (progressPercentage < 10) {
