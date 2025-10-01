@@ -15,7 +15,11 @@
         "skipLibCheck": true,
         "forceConsistentCasingInFileNames": true,
         "moduleResolution": "node",
-        "composite": true
+        "composite": true,
+        "downlevelIteration": true,
+        "incremental": true,
+        "tsBuildInfoFile": "./dist/.tsbuildinfo",
+        "allowSyntheticDefaultImports": true
     },
     "include": [
         "src/**/*"

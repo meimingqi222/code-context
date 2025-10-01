@@ -3,7 +3,7 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { Context, COLLECTION_LIMIT_MESSAGE } from "@zilliz/claude-context-core";
 import { SnapshotManager } from "./snapshot.js";
-import { ensureAbsolutePath, truncateContent, trackCodebasePath, isPathIndexedOrNested } from "./utils.js";
+import { ensureAbsolutePath, truncateContent, trackCodebasePath, isPathIndexedOrNested, findIndexedParentDirectory } from "./utils.js";
 
 export class ToolHandlers {
     private context: Context;
@@ -74,19 +74,20 @@ export class ToolHandlers {
             const cloudCodebases = new Set<string>();
 
             // Check each collection for codebase path
-            for (const collectionName of collections) {
+            for (const collectionName of Array.from(collections)) {
                 try {
+                    const collectionStr = String(collectionName);
                     // Skip collections that don't match the code_chunks pattern (support both legacy and new collections)
-                    if (!collectionName.startsWith('code_chunks_') && !collectionName.startsWith('hybrid_code_chunks_')) {
-                        console.log(`[SYNC-CLOUD] ⏭️  Skipping non-code collection: ${collectionName}`);
+                    if (!collectionStr.startsWith('code_chunks_') && !collectionStr.startsWith('hybrid_code_chunks_')) {
+                        console.log(`[SYNC-CLOUD] ⏭️  Skipping non-code collection: ${collectionStr}`);
                         continue;
                     }
 
-                    console.log(`[SYNC-CLOUD] 🔍 Checking collection: ${collectionName}`);
+                    console.log(`[SYNC-CLOUD] 🔍 Checking collection: ${collectionStr}`);
 
                     // Query the first document to get metadata
                     const results = await vectorDb.query(
-                        collectionName,
+                        collectionStr,
                         '', // Empty filter to get all results
                         ['metadata'], // Only fetch metadata field
                         1 // Only need one result to extract codebasePath
@@ -102,22 +103,22 @@ export class ToolHandlers {
                                 const codebasePath = metadata.codebasePath;
 
                                 if (codebasePath && typeof codebasePath === 'string') {
-                                    console.log(`[SYNC-CLOUD] 📍 Found codebase path: ${codebasePath} in collection: ${collectionName}`);
+                                    console.log(`[SYNC-CLOUD] 📍 Found codebase path: ${codebasePath} in collection: ${collectionStr}`);
                                     cloudCodebases.add(codebasePath);
                                 } else {
-                                    console.warn(`[SYNC-CLOUD] ⚠️  No codebasePath found in metadata for collection: ${collectionName}`);
+                                    console.warn(`[SYNC-CLOUD] ⚠️  No codebasePath found in metadata for collection: ${collectionStr}`);
                                 }
                             } catch (parseError) {
-                                console.warn(`[SYNC-CLOUD] ⚠️  Failed to parse metadata JSON for collection ${collectionName}:`, parseError);
+                                console.warn(`[SYNC-CLOUD] ⚠️  Failed to parse metadata JSON for collection ${collectionStr}:`, parseError);
                             }
                         } else {
-                            console.warn(`[SYNC-CLOUD] ⚠️  No metadata found in collection: ${collectionName}`);
+                            console.warn(`[SYNC-CLOUD] ⚠️  No metadata found in collection: ${collectionStr}`);
                         }
                     } else {
-                        console.log(`[SYNC-CLOUD] ℹ️  Collection ${collectionName} is empty`);
+                        console.log(`[SYNC-CLOUD] ℹ️  Collection ${collectionStr} is empty`);
                     }
                 } catch (collectionError: any) {
-                    console.warn(`[SYNC-CLOUD] ⚠️  Error checking collection ${collectionName}:`, collectionError.message || collectionError);
+                    console.warn(`[SYNC-CLOUD] ⚠️  Error checking collection ${String(collectionName)}:`, collectionError.message || collectionError);
                     // Continue with next collection
                 }
             }
@@ -201,6 +202,38 @@ export class ToolHandlers {
                     }],
                     isError: true
                 };
+            }
+
+            // NEW: Check if this directory is a subdirectory of an already indexed parent directory
+            if (!forceReindex) {
+                const indexedCodebases = this.snapshotManager.getIndexedCodebases();
+                const indexingCodebases = this.snapshotManager.getIndexingCodebases();
+
+                // Check against already indexed directories
+                const indexedParent = findIndexedParentDirectory(absolutePath, indexedCodebases);
+                if (indexedParent) {
+                    console.log(`[DUPLICATE-PREVENTION] 🚫 Prevented indexing of subdirectory '${absolutePath}' because parent '${indexedParent}' is already indexed`);
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `Cannot index '${absolutePath}' because its parent directory '${indexedParent}' is already indexed.\n\nThe parent directory indexing includes all subdirectories, so you can search in this directory using the existing index.\n\nIf you need to index this directory separately, use force=true, but this will create a duplicate index.`
+                        }],
+                        isError: true
+                    };
+                }
+
+                // Check against directories currently being indexed
+                const indexingParent = findIndexedParentDirectory(absolutePath, indexingCodebases);
+                if (indexingParent) {
+                    console.log(`[DUPLICATE-PREVENTION] 🚫 Prevented indexing of subdirectory '${absolutePath}' because parent '${indexingParent}' is currently being indexed`);
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `Cannot index '${absolutePath}' because its parent directory '${indexingParent}' is currently being indexed.\n\nPlease wait for the parent directory indexing to complete. The parent directory indexing will include all subdirectories.`
+                        }],
+                        isError: true
+                    };
+                }
             }
 
             // Check if already indexing
@@ -380,7 +413,7 @@ export class ToolHandlers {
 
             // Start indexing with the appropriate context and progress tracking
             console.log(`[BACKGROUND-INDEX] 🚀 Beginning codebase indexing process...`);
-            const stats = await contextForThisTask.indexCodebase(absolutePath, (progress) => {
+            const stats = await contextForThisTask.indexCodebase(absolutePath, (progress: any) => {
                 // Update progress in snapshot manager using new method
                 this.snapshotManager.setCodebaseIndexing(absolutePath, progress.percentage);
 

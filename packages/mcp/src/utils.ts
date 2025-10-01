@@ -53,6 +53,31 @@ export function isPathIndexedOrNested(searchPath: string, indexedPaths: string[]
     return false;
 }
 
+/**
+ * Find the parent directory that is already indexed for a given subdirectory
+ * Returns the indexed parent directory path if found, null otherwise
+ */
+export function findIndexedParentDirectory(searchPath: string, indexedPaths: string[]): string | null {
+    const normalizedSearchPath = path.resolve(searchPath);
+
+    // Check if the search path is a subdirectory of any indexed path
+    for (const indexedPath of indexedPaths) {
+        const normalizedIndexPath = path.resolve(indexedPath);
+
+        // Check if searchPath starts with indexedPath + path separator (subdirectory)
+        if (normalizedSearchPath.startsWith(normalizedIndexPath + path.sep)) {
+            return normalizedIndexPath;
+        }
+
+        // Also handle the case where paths are exactly equal
+        if (normalizedSearchPath === normalizedIndexPath) {
+            return normalizedIndexPath;
+        }
+    }
+
+    return null;
+}
+
 export function trackCodebasePath(codebasePath: string): void {
     const absolutePath = ensureAbsolutePath(codebasePath);
     console.log(`[TRACKING] Tracked codebase path: ${absolutePath} (not marked as indexed)`);
