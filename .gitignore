@@ -30,10 +30,18 @@ pids
 
 
 # IDE
-# .vscode/
 .idea/
+.vscode/
 *.swp
 *.swo
+
+# Temporary test files
+test-*.js
+1.md
+INDEXING_PERFORMANCE_OPTIMIZATIONS.md
+INDEX_FIX_SUMMARY.md
+WARP.md
+subdirectory-fix-verification.md
 *~
 
 # OS

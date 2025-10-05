@@ -240,69 +240,117 @@ export class Context {
     }
 
     /**
-     * Index a codebase for semantic search
+     * Index a codebase for semantic search with enhanced progress monitoring
      * @param codebasePath Codebase root path
-     * @param progressCallback Optional progress callback function
+     * @param progressCallback Optional progress callback function with detailed metrics
      * @param forceReindex Whether to recreate the collection even if it exists
      * @returns Indexing statistics
      */
     async indexCodebase(
         codebasePath: string,
-        progressCallback?: (progress: { phase: string; current: number; total: number; percentage: number }) => void,
+        progressCallback?: (progress: { phase: string; current: number; total: number; percentage: number; throughput?: number; eta?: number }) => void,
         forceReindex: boolean = false
     ): Promise<{ indexedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' }> {
         const isHybrid = this.getIsHybrid();
         const searchType = isHybrid === true ? 'hybrid search' : 'semantic search';
-        console.log(`[Context] 🚀 Starting to index codebase with ${searchType}: ${codebasePath}`);
+        const startTime = Date.now();
+        
+        console.log(`[Context] 🚀 Starting optimized indexing with ${searchType}: ${codebasePath}`);
+        console.log(`[Context] 🎯 System info: ${this.getSystemMemory()}MB total memory, ${require('os').cpus().length} CPU cores`);
+
+        // Enhanced progress tracking
+        const progressTracker = {
+            startTime,
+            filesProcessed: 0,
+            chunksProcessed: 0,
+            lastUpdate: startTime,
+            lastFilesProcessed: 0,
+            lastChunksProcessed: 0
+        };
 
         // 1. Load ignore patterns from various ignore files
+        progressCallback?.({ phase: 'Loading patterns...', current: 0, total: 100, percentage: 0 });
         await this.loadIgnorePatterns(codebasePath);
 
         // 2. Check and prepare vector collection
-        progressCallback?.({ phase: 'Preparing collection...', current: 0, total: 100, percentage: 0 });
-        console.log(`Debug2: Preparing vector collection for codebase${forceReindex ? ' (FORCE REINDEX)' : ''}`);
+        progressCallback?.({ phase: 'Preparing collection...', current: 5, total: 100, percentage: 5 });
+        console.log(`[Context] 🔧 Preparing vector collection for codebase${forceReindex ? ' (FORCE REINDEX)' : ''}`);
         await this.prepareCollection(codebasePath, forceReindex);
 
         // 3. Recursively traverse codebase to get all supported files
-        progressCallback?.({ phase: 'Scanning files...', current: 5, total: 100, percentage: 5 });
+        progressCallback?.({ phase: 'Scanning files...', current: 10, total: 100, percentage: 10 });
+        const scanStart = Date.now();
         const codeFiles = await this.getCodeFiles(codebasePath);
-        console.log(`[Context] 📁 Found ${codeFiles.length} code files`);
+        const scanTime = Date.now() - scanStart;
+        
+        console.log(`[Context] 📁 Found ${codeFiles.length} code files in ${scanTime}ms`);
 
         if (codeFiles.length === 0) {
             progressCallback?.({ phase: 'No files to index', current: 100, total: 100, percentage: 100 });
             return { indexedFiles: 0, totalChunks: 0, status: 'completed' };
         }
 
-        // 3. Process each file with streaming chunk processing
-        // Reserve 10% for preparation, 90% for actual indexing
-        const indexingStartPercentage = 10;
-        const indexingEndPercentage = 100;
-        const indexingRange = indexingEndPercentage - indexingStartPercentage;
+        // Enhanced progress callback with performance metrics
+        const enhancedProgressCallback = (filePath: string, fileIndex: number, totalFiles: number, chunksSoFar: number) => {
+            const currentTime = Date.now();
+            const elapsed = (currentTime - progressTracker.startTime) / 1000; // seconds
+            
+            progressTracker.filesProcessed = fileIndex;
+            progressTracker.chunksProcessed = chunksSoFar;
+            
+            // Calculate throughput every 5 seconds
+            let throughput = undefined;
+            let eta = undefined;
+            
+            if (currentTime - progressTracker.lastUpdate > 5000) {
+                const timeDiff = (currentTime - progressTracker.lastUpdate) / 1000;
+                const filesDiff = fileIndex - progressTracker.lastFilesProcessed;
+                const chunksDiff = chunksSoFar - progressTracker.lastChunksProcessed;
+                
+                throughput = chunksDiff / timeDiff; // chunks per second
+                eta = throughput > 0 ? (totalFiles - fileIndex) / throughput : undefined;
+                
+                progressTracker.lastUpdate = currentTime;
+                progressTracker.lastFilesProcessed = fileIndex;
+                progressTracker.lastChunksProcessed = chunksSoFar;
+            }
 
+            // Calculate progress percentage (15% for prep, 85% for processing)
+            const progressPercentage = 15 + (fileIndex / totalFiles) * 85;
+
+            if (fileIndex % 25 === 0 || throughput) { // Log every 25 files or when throughput is calculated
+                console.log(`[Context] 📊 Progress: ${fileIndex}/${totalFiles} files (${Math.round(progressPercentage)}%), ${chunksSoFar} chunks, ${throughput ? `${throughput.toFixed(1)} chunks/sec` : 'calculating...'}`);
+            }
+
+            progressCallback?.({
+                phase: `Processing files (${fileIndex}/${totalFiles})...`,
+                current: fileIndex,
+                total: totalFiles,
+                percentage: Math.round(progressPercentage),
+                throughput: throughput,
+                eta: eta
+            });
+        };
+
+        // 4. Process files with enhanced tracking
         const result = await this.processFileList(
             codeFiles,
             codebasePath,
-            (filePath, fileIndex, totalFiles) => {
-                // Calculate progress percentage
-                const progressPercentage = indexingStartPercentage + (fileIndex / totalFiles) * indexingRange;
-
-                console.log(`[Context] 📊 Processed ${fileIndex}/${totalFiles} files`);
-                progressCallback?.({
-                    phase: `Processing files (${fileIndex}/${totalFiles})...`,
-                    current: fileIndex,
-                    total: totalFiles,
-                    percentage: Math.round(progressPercentage)
-                });
-            }
+            enhancedProgressCallback
         );
 
-        console.log(`[Context] ✅ Codebase indexing completed! Processed ${result.processedFiles} files in total, generated ${result.totalChunks} code chunks`);
+        const totalTime = (Date.now() - startTime) / 1000;
+        const avgThroughput = result.totalChunks / totalTime;
+        
+        console.log(`[Context] ✅ Optimized indexing completed!`);
+        console.log(`[Context] 📊 Final stats: ${result.processedFiles} files, ${result.totalChunks} chunks, ${avgThroughput.toFixed(2)} chunks/sec, ${totalTime.toFixed(1)}s total`);
 
         progressCallback?.({
             phase: 'Indexing complete!',
             current: result.processedFiles,
             total: codeFiles.length,
-            percentage: 100
+            percentage: 100,
+            throughput: avgThroughput
         });
 
         return {
@@ -661,8 +709,17 @@ export class Context {
      */
     private async getCodeFiles(codebasePath: string): Promise<string[]> {
         const files: string[] = [];
+        let ignoredDirs = 0;
+        let ignoredFiles = 0;
+        let unsupportedFiles = 0;
+        let totalDirs = 0;
+
+        console.log(`[Context] 📂 Starting file scan in: ${codebasePath}`);
+        console.log(`[Context] 🎯 Looking for extensions: ${this.supportedExtensions.slice(0, 10).join(', ')}${this.supportedExtensions.length > 10 ? ` ...and ${this.supportedExtensions.length - 10} more` : ''}`);
+        console.log(`[Context] 🚫 Active ignore patterns: ${this.ignorePatterns.length} patterns`);
 
         const traverseDirectory = async (currentPath: string) => {
+            totalDirs++;
             const entries = await fs.promises.readdir(currentPath, { withFileTypes: true });
 
             for (const entry of entries) {
@@ -670,6 +727,14 @@ export class Context {
 
                 // Check if path matches ignore patterns
                 if (this.matchesIgnorePattern(fullPath, codebasePath)) {
+                    if (entry.isDirectory()) {
+                        ignoredDirs++;
+                        if (ignoredDirs <= 5) {
+                            console.log(`[Context] ⏭️  Ignoring directory: ${path.relative(codebasePath, fullPath)}`);
+                        }
+                    } else {
+                        ignoredFiles++;
+                    }
                     continue;
                 }
 
@@ -679,17 +744,90 @@ export class Context {
                     const ext = path.extname(entry.name);
                     if (this.supportedExtensions.includes(ext)) {
                         files.push(fullPath);
+                        if (files.length <= 5) {
+                            console.log(`[Context] ✅ Found file: ${path.relative(codebasePath, fullPath)}`);
+                        }
+                    } else {
+                        unsupportedFiles++;
                     }
                 }
             }
         };
 
         await traverseDirectory(codebasePath);
+        
+        console.log(`[Context] 📊 Scan complete:`);
+        console.log(`[Context]   ✅ Found ${files.length} supported code files`);
+        console.log(`[Context]   ⏭️  Ignored ${ignoredDirs} directories, ${ignoredFiles} files`);
+        console.log(`[Context]   📁 Scanned ${totalDirs} directories`);
+        console.log(`[Context]   ❌ Skipped ${unsupportedFiles} files with unsupported extensions`);
+        
+        if (files.length === 0) {
+            console.warn(`[Context] ⚠️  WARNING: No files found! This might indicate:`);
+            console.warn(`[Context]      1. All files are being filtered by ignore patterns`);
+            console.warn(`[Context]      2. No files with supported extensions exist`);
+            console.warn(`[Context]      3. Directory permissions issue`);
+            console.warn(`[Context]   First 10 ignore patterns: ${this.ignorePatterns.slice(0, 10).join(', ')}`);
+        }
+        
         return files;
     }
 
     /**
- * Process a list of files with streaming chunk processing
+     * Get API concurrency setting from environment or calculate based on provider
+     */
+    private getAPIConcurrency(): number {
+        const envConcurrency = envManager.get('API_CONCURRENCY');
+        if (envConcurrency) {
+            const parsed = parseInt(envConcurrency, 10);
+            if (!isNaN(parsed) && parsed > 0) {
+                return Math.min(parsed, 10); // Max 10 for safety
+            }
+        }
+        
+        // Provider-specific safe concurrency limits
+        const provider = this.embedding.getProvider();
+        const providerConcurrency = {
+            'OpenAI': 5,        // OpenAI: 3000 RPM limit
+            'VoyageAI': 3,     // VoyageAI: 300 RPM limit  
+            'Gemini': 2,       // Gemini: Conservative
+            'Ollama': 10       // Ollama: Local, can handle more
+        };
+        
+        return providerConcurrency[provider as keyof typeof providerConcurrency] || 3;
+    }
+
+    /**
+     * Get file concurrency setting from environment or calculate based on system
+     */
+    private getFileConcurrency(): number {
+        const envConcurrency = envManager.get('FILE_CONCURRENCY');
+        if (envConcurrency) {
+            const parsed = parseInt(envConcurrency, 10);
+            if (!isNaN(parsed) && parsed > 0) {
+                return Math.min(parsed, 50); // Max 50 for safety
+            }
+        }
+        
+        // Default: CPU cores * 2, max 20
+        const os = require('os');
+        const cpuCores = os.cpus().length;
+        return Math.min(cpuCores * 2, 20);
+    }
+
+    /**
+     * Check if concurrent indexing is enabled
+     */
+    private isConcurrentIndexingEnabled(): boolean {
+        const envValue = envManager.get('ENABLE_CONCURRENT_INDEXING');
+        if (envValue === undefined || envValue === null) {
+            return true; // Enabled by default
+        }
+        return envValue.toLowerCase() === 'true';
+    }
+
+    /**
+ * Process a list of files with concurrent processing and streaming chunk processing
  * @param filePaths Array of file paths to process
  * @param codebasePath Base path for the codebase
  * @param onFileProcessed Callback called when each file is processed
@@ -698,17 +836,223 @@ export class Context {
     private async processFileList(
         filePaths: string[],
         codebasePath: string,
-        onFileProcessed?: (filePath: string, fileIndex: number, totalFiles: number) => void
+        onFileProcessed?: (filePath: string, fileIndex: number, totalFiles: number, chunksSoFar: number) => void
     ): Promise<{ processedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' }> {
         const isHybrid = this.getIsHybrid();
-        const EMBEDDING_BATCH_SIZE = Math.max(1, parseInt(envManager.get('EMBEDDING_BATCH_SIZE') || '100', 10));
+        const isConcurrent = this.isConcurrentIndexingEnabled();
+        
+        // Dynamic batch size optimization based on embedding provider and system capabilities
+        const optimalBatchSize = this.calculateOptimalBatchSize();
+        const EMBEDDING_BATCH_SIZE = Math.max(10, optimalBatchSize);
         const CHUNK_LIMIT = 450000;
-        console.log(`[Context] 🔧 Using EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE}`);
+        const MEMORY_LIMIT_MB = parseInt(envManager.get('MEMORY_LIMIT_MB') || '1536', 10);
+        const FILE_CONCURRENCY = this.getFileConcurrency();
+        
+        console.log(`[Context] 🔧 Optimized indexing - Batch size: ${EMBEDDING_BATCH_SIZE}, Memory limit: ${MEMORY_LIMIT_MB}MB, File concurrency: ${FILE_CONCURRENCY}`);
+        console.log(`[Context] 🚀 Concurrent mode: ${isConcurrent ? 'ENABLED' : 'DISABLED'}`);
 
+        if (isConcurrent) {
+            // Use concurrent processing
+            return await this.processFileListConcurrent(
+                filePaths,
+                codebasePath,
+                onFileProcessed,
+                EMBEDDING_BATCH_SIZE,
+                CHUNK_LIMIT,
+                MEMORY_LIMIT_MB,
+                FILE_CONCURRENCY
+            );
+        } else {
+            // Use legacy serial processing
+            return await this.processFileListSerial(
+                filePaths,
+                codebasePath,
+                onFileProcessed,
+                EMBEDDING_BATCH_SIZE,
+                CHUNK_LIMIT,
+                MEMORY_LIMIT_MB
+            );
+        }
+    }
+
+    /**
+     * Process files concurrently (new optimized method)
+     */
+    private async processFileListConcurrent(
+        filePaths: string[],
+        codebasePath: string,
+        onFileProcessed: ((filePath: string, fileIndex: number, totalFiles: number, chunksSoFar: number) => void) | undefined,
+        EMBEDDING_BATCH_SIZE: number,
+        CHUNK_LIMIT: number,
+        MEMORY_LIMIT_MB: number,
+        FILE_CONCURRENCY: number
+    ): Promise<{ processedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' }> {
+        const isHybrid = this.getIsHybrid();
+        
         let chunkBuffer: Array<{ chunk: CodeChunk; codebasePath: string }> = [];
         let processedFiles = 0;
         let totalChunks = 0;
         let limitReached = false;
+        let batchCount = 0;
+        let failedFiles: string[] = [];
+        const startTime = Date.now();
+
+        console.log(`[Context] 🚀 Starting concurrent file processing with concurrency: ${FILE_CONCURRENCY}`);
+
+        // Process files in concurrent batches
+        for (let i = 0; i < filePaths.length && !limitReached; i += FILE_CONCURRENCY) {
+            const batch = filePaths.slice(i, i + FILE_CONCURRENCY);
+            const batchStartTime = Date.now();
+            
+            console.log(`[Context] 📦 Processing file batch ${Math.floor(i / FILE_CONCURRENCY) + 1}/${Math.ceil(filePaths.length / FILE_CONCURRENCY)}: ${batch.length} files`);
+
+            // Process batch concurrently
+            const results = await Promise.allSettled(
+                batch.map(async (filePath) => {
+                    try {
+                        const content = await fs.promises.readFile(filePath, 'utf-8');
+                        const language = this.getLanguageFromExtension(path.extname(filePath));
+                        const chunks = await this.codeSplitter.split(content, language, filePath);
+                        
+                        // Performance logging for large files
+                        if (chunks.length > 50) {
+                            console.warn(`[Context] ⚠️  File ${path.relative(codebasePath, filePath)} generated ${chunks.length} chunks (${Math.round(content.length / 1024)}KB)`);
+                        }
+                        
+                        return { filePath, chunks, success: true };
+                    } catch (error) {
+                        console.warn(`[Context] ⚠️  Failed to process file ${filePath}: ${error}`);
+                        return { filePath, chunks: [], success: false, error };
+                    }
+                })
+            );
+
+            const batchTime = Date.now() - batchStartTime;
+            console.log(`[Context] ⏱️  Batch completed in ${batchTime}ms (${(batchTime / batch.length).toFixed(0)}ms/file avg)`);
+
+            // Process results
+            for (const result of results) {
+                if (result.status === 'fulfilled' && result.value.success) {
+                    const { filePath, chunks } = result.value;
+                    
+                    // Add chunks to buffer
+                    for (const chunk of chunks) {
+                        chunkBuffer.push({ chunk, codebasePath });
+                        totalChunks++;
+
+                        // Check chunk limit
+                        if (totalChunks >= CHUNK_LIMIT) {
+                            console.warn(`[Context] ⚠️  Chunk limit of ${CHUNK_LIMIT} reached. Stopping indexing.`);
+                            limitReached = true;
+                            break;
+                        }
+                    }
+
+                    // Process embedding batches as buffer fills
+                    if (chunkBuffer.length >= EMBEDDING_BATCH_SIZE || this.getMemoryUsage() > MEMORY_LIMIT_MB) {
+                        batchCount++;
+                        try {
+                            const embeddingStart = Date.now();
+                            await this.processChunkBuffer(chunkBuffer);
+                            const embeddingTime = Date.now() - embeddingStart;
+                            
+                            if (embeddingTime > 30000) {
+                                console.log(`[Context] 🐌 Slow embedding batch detected (${embeddingTime}ms)`);
+                            }
+                        } catch (error) {
+                            const searchType = isHybrid === true ? 'hybrid' : 'regular';
+                            console.error(`[Context] ❌ Failed to process chunk batch ${batchCount} for ${searchType}:`, error);
+                        } finally {
+                            chunkBuffer = [];
+                            
+                            // Force garbage collection if memory is high
+                            if (this.getMemoryUsage() > MEMORY_LIMIT_MB * 0.8) {
+                                if (global.gc) {
+                                    global.gc();
+                                }
+                            }
+                        }
+                    }
+
+                    processedFiles++;
+                    onFileProcessed?.(filePath, processedFiles, filePaths.length, totalChunks);
+                } else {
+                    // Handle failed files
+                    if (result.status === 'fulfilled' && !result.value.success) {
+                        failedFiles.push(result.value.filePath);
+                    } else if (result.status === 'rejected') {
+                        console.error(`[Context] ❌ Unexpected error in file processing: ${result.reason}`);
+                    }
+                }
+
+                if (limitReached) break;
+            }
+
+            // Performance metrics
+            if (processedFiles % 50 === 0 || (i + FILE_CONCURRENCY >= filePaths.length)) {
+                const elapsed = Date.now() - startTime;
+                const throughput = (totalChunks / elapsed) * 1000;
+                const filesPerSec = (processedFiles / elapsed) * 1000;
+                console.log(`[Context] 📊 Progress: ${processedFiles}/${filePaths.length} files (${filesPerSec.toFixed(1)} files/sec), ${totalChunks} chunks (${throughput.toFixed(2)} chunks/sec)`);
+            }
+
+            if (limitReached) break;
+        }
+
+        // Process remaining chunks
+        if (chunkBuffer.length > 0) {
+            const searchType = isHybrid === true ? 'hybrid' : 'regular';
+            console.log(`📝 Processing final batch of ${chunkBuffer.length} chunks for ${searchType}`);
+            try {
+                await this.processChunkBuffer(chunkBuffer);
+            } catch (error) {
+                console.error(`[Context] ❌ Failed to process final chunk batch for ${searchType}:`, error);
+            }
+        }
+
+        // Report failed files
+        if (failedFiles.length > 0) {
+            console.warn(`[Context] ⚠️  Failed to process ${failedFiles.length} files:`);
+            failedFiles.slice(0, 5).forEach(f => console.warn(`[Context]   - ${f}`));
+            if (failedFiles.length > 5) {
+                console.warn(`[Context]   ... and ${failedFiles.length - 5} more`);
+            }
+        }
+
+        // Final performance summary
+        const totalTime = Date.now() - startTime;
+        const avgThroughput = (totalChunks / totalTime) * 1000;
+        const avgFilesPerSec = (processedFiles / totalTime) * 1000;
+        console.log(`[Context] ✅ Concurrent processing completed: ${processedFiles} files (${avgFilesPerSec.toFixed(2)} files/sec), ${batchCount} embedding batches, ${avgThroughput.toFixed(2)} chunks/sec, ${Math.round(totalTime/1000)}s total`);
+
+        return {
+            processedFiles,
+            totalChunks,
+            status: limitReached ? 'limit_reached' : 'completed'
+        };
+    }
+
+    /**
+     * Process files serially (legacy method for compatibility)
+     */
+    private async processFileListSerial(
+        filePaths: string[],
+        codebasePath: string,
+        onFileProcessed: ((filePath: string, fileIndex: number, totalFiles: number, chunksSoFar: number) => void) | undefined,
+        EMBEDDING_BATCH_SIZE: number,
+        CHUNK_LIMIT: number,
+        MEMORY_LIMIT_MB: number
+    ): Promise<{ processedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' }> {
+        const isHybrid = this.getIsHybrid();
+        
+        console.log(`[Context] 🐌 Using serial processing mode (legacy)`);
+        
+        let chunkBuffer: Array<{ chunk: CodeChunk; codebasePath: string }> = [];
+        let processedFiles = 0;
+        let totalChunks = 0;
+        let limitReached = false;
+        let batchCount = 0;
+        const startTime = Date.now();
 
         for (let i = 0; i < filePaths.length; i++) {
             const filePath = filePaths[i];
@@ -718,30 +1062,45 @@ export class Context {
                 const language = this.getLanguageFromExtension(path.extname(filePath));
                 const chunks = await this.codeSplitter.split(content, language, filePath);
 
-                // Log files with many chunks or large content
+                // Performance logging for large files
                 if (chunks.length > 50) {
                     console.warn(`[Context] ⚠️  File ${filePath} generated ${chunks.length} chunks (${Math.round(content.length / 1024)}KB)`);
                 } else if (content.length > 100000) {
                     console.log(`📄 Large file ${filePath}: ${Math.round(content.length / 1024)}KB -> ${chunks.length} chunks`);
                 }
 
-                // Add chunks to buffer
+                // Add chunks to buffer with memory monitoring
                 for (const chunk of chunks) {
                     chunkBuffer.push({ chunk, codebasePath });
                     totalChunks++;
 
-                    // Process batch when buffer reaches EMBEDDING_BATCH_SIZE
-                    if (chunkBuffer.length >= EMBEDDING_BATCH_SIZE) {
+                    // Dynamic batch processing with memory awareness
+                    if (chunkBuffer.length >= EMBEDDING_BATCH_SIZE || this.getMemoryUsage() > MEMORY_LIMIT_MB) {
+                        batchCount++;
                         try {
+                            const batchStart = Date.now();
                             await this.processChunkBuffer(chunkBuffer);
+                            const batchTime = Date.now() - batchStart;
+                            
+                            // Adaptive batch size adjustment based on performance
+                            if (batchTime > 30000) { // If batch takes > 30s
+                                console.log(`[Context] 🐌 Slow batch detected (${batchTime}ms), considering smaller batch size`);
+                            }
                         } catch (error) {
                             const searchType = isHybrid === true ? 'hybrid' : 'regular';
-                            console.error(`[Context] ❌ Failed to process chunk batch for ${searchType}:`, error);
+                            console.error(`[Context] ❌ Failed to process chunk batch ${batchCount} for ${searchType}:`, error);
                             if (error instanceof Error) {
                                 console.error('[Context] Stack trace:', error.stack);
                             }
                         } finally {
                             chunkBuffer = []; // Always clear buffer, even on failure
+                            
+                            // Force garbage collection if memory is high
+                            if (this.getMemoryUsage() > MEMORY_LIMIT_MB * 0.8) {
+                                if (global.gc) {
+                                    global.gc();
+                                }
+                            }
                         }
                     }
 
@@ -754,7 +1113,14 @@ export class Context {
                 }
 
                 processedFiles++;
-                onFileProcessed?.(filePath, i + 1, filePaths.length);
+                onFileProcessed?.(filePath, i + 1, filePaths.length, totalChunks);
+
+                // Performance metrics
+                if (processedFiles % 50 === 0) {
+                    const elapsed = Date.now() - startTime;
+                    const throughput = (totalChunks / elapsed) * 1000; // chunks per second
+                    console.log(`[Context] 📊 Progress: ${processedFiles}/${filePaths.length} files, ${totalChunks} chunks, ${throughput.toFixed(2)} chunks/sec`);
+                }
 
                 if (limitReached) {
                     break; // Exit the outer loop (over files)
@@ -779,6 +1145,11 @@ export class Context {
             }
         }
 
+        // Final performance summary
+        const totalTime = Date.now() - startTime;
+        const avgThroughput = (totalChunks / totalTime) * 1000;
+        console.log(`[Context] ✅ Batch processing completed: ${batchCount} batches, ${avgThroughput.toFixed(2)} avg chunks/sec, ${Math.round(totalTime/1000)}s total`);
+
         return {
             processedFiles,
             totalChunks,
@@ -787,7 +1158,7 @@ export class Context {
     }
 
     /**
- * Process accumulated chunk buffer
+ * Process accumulated chunk buffer with optional API concurrency
  */
     private async processChunkBuffer(chunkBuffer: Array<{ chunk: CodeChunk; codebasePath: string }>): Promise<void> {
         if (chunkBuffer.length === 0) return;
@@ -803,6 +1174,41 @@ export class Context {
         const searchType = isHybrid === true ? 'hybrid' : 'regular';
         console.log(`[Context] 🔄 Processing batch of ${chunks.length} chunks (~${estimatedTokens} tokens) for ${searchType}`);
         await this.processChunkBatch(chunks, codebasePath);
+    }
+
+    /**
+     * Process multiple chunk buffers concurrently
+     * This enables concurrent API calls to embedding providers
+     */
+    private async processChunkBuffersConcurrently(
+        chunkBuffers: Array<Array<{ chunk: CodeChunk; codebasePath: string }>>,
+        apiConcurrency: number
+    ): Promise<void> {
+        if (chunkBuffers.length === 0) return;
+
+        console.log(`[Context] 🚀 Processing ${chunkBuffers.length} embedding batches with concurrency: ${apiConcurrency}`);
+        
+        // Process batches in concurrent groups
+        for (let i = 0; i < chunkBuffers.length; i += apiConcurrency) {
+            const concurrentBatch = chunkBuffers.slice(i, i + apiConcurrency);
+            const batchStartTime = Date.now();
+            
+            // Process multiple embedding batches concurrently
+            await Promise.all(
+                concurrentBatch.map(async (buffer) => {
+                    try {
+                        await this.processChunkBuffer(buffer);
+                    } catch (error) {
+                        console.error(`[Context] ❌ Failed to process concurrent embedding batch:`, error);
+                        throw error; // Re-throw to maintain error handling
+                    }
+                })
+            );
+            
+            const batchTime = Date.now() - batchStartTime;
+            const batchesProcessed = Math.min(apiConcurrency, chunkBuffers.length - i);
+            console.log(`[Context] ⚡ Processed ${batchesProcessed} embedding batches concurrently in ${batchTime}ms (${(batchTime / batchesProcessed).toFixed(0)}ms/batch avg)`);
+        }
     }
 
     /**
@@ -875,6 +1281,54 @@ export class Context {
 
             // Store to vector database
             await this.vectorDatabase.insert(this.getCollectionName(codebasePath), documents);
+        }
+    }
+
+    /**
+     * Calculate optimal batch size based on embedding provider and system capabilities
+     */
+    private calculateOptimalBatchSize(): number {
+        const envBatchSize = parseInt(envManager.get('EMBEDDING_BATCH_SIZE') || '100', 10);
+        const provider = this.embedding.getProvider();
+        
+        // Provider-specific optimal batch sizes based on API limits and performance
+        const providerOptimalSizes = {
+            'OpenAI': 1000,        // OpenAI supports up to 2048, but 1000 is safer for stability
+            'VoyageAI': 128,       // VoyageAI has stricter limits
+            'Gemini': 100,         // Gemini API limits
+            'Ollama': 50           // Local models, conservative for memory
+        };
+
+        const optimalSize = providerOptimalSizes[provider as keyof typeof providerOptimalSizes] || 100;
+        const systemMemoryMB = this.getSystemMemory();
+        
+        // Adjust based on available memory (larger batches for systems with more memory)
+        const memoryMultiplier = systemMemoryMB > 8192 ? 1.5 : systemMemoryMB > 4096 ? 1.2 : 1.0;
+        const adjustedSize = Math.round(optimalSize * memoryMultiplier);
+        
+        const finalSize = Math.max(10, Math.min(envBatchSize, adjustedSize));
+        console.log(`[Context] 🎯 Calculated batch size: ${finalSize} (provider: ${provider}, system memory: ${systemMemoryMB}MB)`);
+        
+        return finalSize;
+    }
+
+    /**
+     * Get current memory usage in MB
+     */
+    private getMemoryUsage(): number {
+        const usage = process.memoryUsage();
+        return Math.round(usage.heapUsed / 1024 / 1024);
+    }
+
+    /**
+     * Get total system memory in MB
+     */
+    private getSystemMemory(): number {
+        try {
+            const os = require('os');
+            return Math.round(os.totalmem() / 1024 / 1024);
+        } catch {
+            return 4096; // Default fallback to 4GB
         }
     }
 
@@ -987,6 +1441,12 @@ export class Context {
                 if (entry.isFile() &&
                     entry.name.startsWith('.') &&
                     entry.name.endsWith('ignore')) {
+                    // Skip .npmignore as it's for npm packaging, not code indexing
+                    // .npmignore often contains '*' which would ignore everything
+                    if (entry.name === '.npmignore') {
+                        console.log(`📄 Skipping .npmignore (npm packaging file, not for code indexing)`);
+                        continue;
+                    }
                     ignoreFiles.push(path.join(codebasePath, entry.name));
                 }
             }

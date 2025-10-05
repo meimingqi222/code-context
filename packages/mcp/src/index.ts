@@ -74,7 +74,7 @@ class ContextMcpServer {
         // Initialize managers
         this.snapshotManager = new SnapshotManager();
         this.syncManager = new SyncManager(this.context, this.snapshotManager);
-        this.toolHandlers = new ToolHandlers(this.context, this.snapshotManager);
+        this.toolHandlers = new ToolHandlers(this.context, this.snapshotManager, this.syncManager);
 
         // Load existing codebase snapshot on startup
         this.snapshotManager.loadCodebaseSnapshot();
@@ -84,36 +84,55 @@ class ContextMcpServer {
 
     private setupTools() {
         const index_description = `
-Index a codebase directory to enable semantic search using a configurable code splitter.
+🔍 **Index a codebase for semantic search**
 
-⚠️ **IMPORTANT**:
-- You MUST provide an absolute path to the target codebase.
+Enables AI-powered code understanding across the entire project. This tool creates a searchable knowledge base of your code.
 
-✨ **Usage Guidance**:
-- This tool is typically used when search fails due to an unindexed codebase.
-- If indexing is attempted on an already indexed path, and a conflict is detected, you MUST prompt the user to confirm whether to proceed with a force index (i.e., re-indexing and overwriting the previous index).
+✨ **Why index**:
+- Find code by describing what it does in natural language
+- Discover related functions/classes across the entire codebase
+- Understand code architecture and patterns instantly
+- Much faster and more accurate than grep for complex queries
+
+🎯 **When to use**:
+- First time working with a codebase → Index immediately
+- Before any code exploration or analysis task
+- When grep/file search isn't finding what you need
+- Before implementing new features or fixing bugs
+
+⚡ **Process**:
+- Indexes in background (1-5 minutes for most projects)
+- You can start searching immediately
+- Automatically filters out node_modules, build artifacts, etc.
+
+Just provide the absolute project path to start!
 `;
 
 
         const search_description = `
-Search the indexed codebase using natural language queries within a specified absolute path.
+🔍 **Semantic code search - Find code by describing what it does**
 
-⚠️ **IMPORTANT**:
-- You MUST provide an absolute path.
+Search your indexed codebase using natural language. Much more powerful than grep/file search.
 
-🎯 **When to Use**:
-This tool is versatile and can be used before completing various tasks to retrieve relevant context:
-- **Code search**: Find specific functions, classes, or implementations
-- **Context-aware assistance**: Gather relevant code context before making changes
-- **Issue identification**: Locate problematic code sections or bugs
-- **Code review**: Understand existing implementations and patterns
-- **Refactoring**: Find all related code pieces that need to be updated
-- **Feature development**: Understand existing architecture and similar implementations
-- **Duplicate detection**: Identify redundant or duplicated code patterns across the codebase
+🎯 **Use this for**:
+- "Find authentication logic" → Locates all auth-related code
+- "Database connection setup" → Finds DB initialization
+- "Error handling for API calls" → Discovers error patterns
+- "Functions that parse JSON" → Identifies JSON utilities
+- "Classes implementing caching" → Finds cache implementations
 
-✨ **Usage Guidance**:
-- If the codebase is not indexed, this tool will return a clear error message indicating that indexing is required first.
-- You can then use the index_codebase tool to index the codebase before searching again.
+✨ **Advantages over grep**:
+- Understands code meaning, not just text matching
+- Finds related code even with different variable names
+- Returns ranked results (most relevant first)
+- Includes code context (file path, line numbers, snippets)
+
+💡 **Best practices**:
+- Use descriptive queries ("functions that validate email" not just "email")
+- Ask about functionality, not specific variable names
+- For new codebases → Always index first, then search
+
+📋 **Output**: Returns top relevant code chunks with file locations.
 `;
 
         // Define available tools

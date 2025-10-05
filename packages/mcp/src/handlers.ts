@@ -3,19 +3,65 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { Context, COLLECTION_LIMIT_MESSAGE } from "@zilliz/claude-context-core";
 import { SnapshotManager } from "./snapshot.js";
+import { SyncManager } from "./sync.js";
 import { ensureAbsolutePath, truncateContent, trackCodebasePath, isPathIndexedOrNested, findIndexedParentDirectory } from "./utils.js";
 
 export class ToolHandlers {
     private context: Context;
     private snapshotManager: SnapshotManager;
+    private syncManager: SyncManager | null = null;
     private indexingStats: { indexedFiles: number; totalChunks: number } | null = null;
     private currentWorkspace: string;
 
-    constructor(context: Context, snapshotManager: SnapshotManager) {
+    constructor(context: Context, snapshotManager: SnapshotManager, syncManager?: SyncManager) {
         this.context = context;
         this.snapshotManager = snapshotManager;
+        this.syncManager = syncManager || null;
         this.currentWorkspace = process.cwd();
         console.log(`[WORKSPACE] Current workspace: ${this.currentWorkspace}`);
+    }
+
+    /**
+     * Smart path resolution that tries multiple common project root directories
+     * and provides helpful error messages when paths can't be resolved.
+     */
+    private smartPathResolution(inputPath: string, operation: 'index' | 'search' | 'clear' | 'status'): { resolvedPath: string; pathInfo: string } {
+        // If already absolute, return as-is
+        if (path.isAbsolute(inputPath)) {
+            return {
+                resolvedPath: inputPath,
+                pathInfo: inputPath
+            };
+        }
+
+        const workspacePath = this.currentWorkspace;
+        const possiblePaths = [
+            path.resolve(workspacePath, inputPath),                    // Current workspace
+            path.resolve(workspacePath, '..', inputPath),               // Parent directory
+            path.resolve(workspacePath, '..', '..', inputPath),         // Grandparent directory
+            path.resolve(process.cwd(), inputPath),                     // Current working directory
+            path.resolve(process.cwd(), '..', inputPath),               // Parent of cwd
+        ];
+
+        // Try to find an existing path
+        for (const possiblePath of possiblePaths) {
+            if (fs.existsSync(possiblePath)) {
+                const stat = fs.statSync(possiblePath);
+                if (stat.isDirectory()) {
+                    return {
+                        resolvedPath: possiblePath,
+                        pathInfo: `${inputPath} → ${possiblePath}`
+                    };
+                }
+            }
+        }
+
+        // If no path found, return the most likely candidate with helpful info
+        const mostLikely = path.resolve(workspacePath, inputPath);
+        return {
+            resolvedPath: mostLikely,
+            pathInfo: `${inputPath} → ${mostLikely} (path will be created/validated during ${operation})`
+        };
     }
 
     /**
@@ -178,8 +224,9 @@ export class ToolHandlers {
                     isError: true
                 };
             }
-            // Force absolute path resolution - warn if relative path provided
-            const absolutePath = ensureAbsolutePath(codebasePath);
+            
+            // Smart path resolution with helpful feedback
+            const { resolvedPath: absolutePath, pathInfo } = this.smartPathResolution(codebasePath, 'index');
 
             // Validate path exists
             if (!fs.existsSync(absolutePath)) {
@@ -332,11 +379,17 @@ export class ToolHandlers {
             // Track the codebase path for syncing
             trackCodebasePath(absolutePath);
 
+            // Ensure background sync is active when starting to index
+            if (this.syncManager && !this.syncManager.isBackgroundSyncActive()) {
+                console.log('[INDEX] Background sync is not active. Restarting for new codebase indexing.');
+                this.syncManager.startBackgroundSync();
+            }
+
             // Start background indexing - now safe to proceed
             this.startBackgroundIndexing(absolutePath, forceReindex, splitterType);
 
-            const pathInfo = codebasePath !== absolutePath
-                ? `\nNote: Input path '${codebasePath}' was resolved to absolute path '${absolutePath}'`
+            const pathResolutionInfo = pathInfo !== codebasePath
+                ? `\n📍 Path resolution: ${pathInfo}`
                 : '';
 
             const extensionInfo = customFileExtensions.length > 0
@@ -350,7 +403,20 @@ export class ToolHandlers {
             return {
                 content: [{
                     type: "text",
-                    text: `Started background indexing for codebase '${absolutePath}' using ${splitterType.toUpperCase()} splitter.${pathInfo}${extensionInfo}${ignoreInfo}\n\nIndexing is running in the background. You can search the codebase while indexing is in progress, but results may be incomplete until indexing completes.`
+                    text: `🚀 **Indexing Started Successfully**
+
+📁 Codebase: ${absolutePath}
+🔧 Splitter: ${splitterType.toUpperCase()}
+⚡ Mode: Background indexing (you can continue working)
+
+${pathResolutionInfo}${extensionInfo}${ignoreInfo}
+
+💡 **What happens next**:
+- Indexing runs automatically in the background
+- You can start searching immediately (results improve as indexing progresses)
+- Large codebases may take a few minutes to complete
+
+Ready to explore your codebase!`
                 }]
             };
 
@@ -467,17 +533,29 @@ export class ToolHandlers {
             // Sync indexed codebases from cloud first
             await this.syncIndexedCodebasesFromCloud();
 
-            // Force absolute path resolution - warn if relative path provided
-            const absolutePath = ensureAbsolutePath(codebasePath);
+            // Smart path resolution
+            const { resolvedPath: absolutePath, pathInfo } = this.smartPathResolution(codebasePath, 'search');
 
             // Validate path exists
             if (!fs.existsSync(absolutePath)) {
                 return {
                     content: [{
                         type: "text",
-                        text: `Error: Path '${absolutePath}' does not exist. Original input: '${codebasePath}'`
+                        text: `🔍 **Path Not Found**
+
+I couldn't find the codebase at: ${absolutePath}
+
+**Path resolution attempted**: ${pathInfo}
+
+💡 **Suggestions**:
+- Check if the project directory exists
+- Try using an absolute path (e.g., /Users/yourname/project)
+- Verify the project name spelling
+- Use a parent directory if searching within a subdirectory
+
+**Example**: Use the full project path like "/Users/yourname/my-project" instead of just "my-project"`
                     }],
-                    isError: true
+                    isError: false // Changed to false to provide helpful feedback
                 };
             }
 
@@ -506,9 +584,21 @@ export class ToolHandlers {
                 return {
                     content: [{
                         type: "text",
-                        text: `Error: Codebase '${absolutePath}' is not indexed. Please index it first using the index_codebase tool.`
-                    }],
-                    isError: true
+                        text: `💡 **Suggestion**: This codebase needs to be indexed first for efficient searching.
+
+**Recommended action**: Index this codebase now:
+- Use the index_codebase tool with path: '${absolutePath}'
+- Indexing runs in background, you can continue working
+
+**Alternative**: You can still explore the codebase using file system tools, but semantic search won't be available until indexing completes.
+
+**Benefits of indexing**:
+- Find code by natural language queries
+- Discover related code across the entire codebase
+- Get intelligent suggestions and context
+
+Ready to index this codebase?`
+                    }]
                 };
             }
 
@@ -580,26 +670,57 @@ export class ToolHandlers {
                 };
             }
 
-            // Format results
+            // Format results in a more structured way for better LLM understanding
+            const searchSummary = {
+                query: query,
+                codebase: absolutePath,
+                actual_search_path: actualIndexedPath || absolutePath,
+                total_results: searchResults.length,
+                indexing_status: isIndexing ? 'In Progress' : 'Complete',
+                is_parent_search: actualIndexedPath && actualIndexedPath !== absolutePath
+            };
+
+            // Format individual results with clear structure
             const formattedResults = searchResults.map((result: any, index: number) => {
                 const location = `${result.relativePath}:${result.startLine}-${result.endLine}`;
                 const context = truncateContent(result.content, 5000);
                 const codebaseInfo = path.basename(searchTargetPath);
+                const relevance = Math.round((result.score || 0) * 100);
 
-                return `${index + 1}. Code snippet (${result.language}) [${codebaseInfo}]\n` +
-                    `   Location: ${location}\n` +
-                    `   Rank: ${index + 1}\n` +
-                    `   Context: \n\`\`\`${result.language}\n${context}\n\`\`\`\n`;
-            }).join('\n');
+                return {
+                    rank: index + 1,
+                    file: result.relativePath,
+                    location: location,
+                    language: result.language,
+                    relevance: `${relevance}%`,
+                    codebase: codebaseInfo,
+                    content: context
+                };
+            });
 
-            let resultMessage = `Found ${searchResults.length} results for query: "${query}" in codebase '${absolutePath}'`;
-            if (actualIndexedPath && actualIndexedPath !== absolutePath) {
-                resultMessage += ` (searched through indexed parent directory '${actualIndexedPath}')`;
+            // Create a structured response that's easy for LLM to parse
+            let resultMessage = `🔍 **Search Results Summary**\n`;
+            resultMessage += `• Query: "${query}"\n`;
+            resultMessage += `• Codebase: ${absolutePath}\n`;
+            resultMessage += `• Results: ${searchResults.length} matches\n`;
+            resultMessage += `• Status: ${isIndexing ? '⏳ Indexing in progress' : '✅ Fully indexed'}\n`;
+            
+            if (searchSummary.is_parent_search) {
+                resultMessage += `• Search scope: Parent directory '${actualIndexedPath}'\n`;
             }
-            resultMessage += `${indexingStatusMessage}\n\n${formattedResults}`;
+            
+            resultMessage += `\n📋 **Results**:\n\n`;
+
+            // Add structured results
+            formattedResults.forEach((result) => {
+                resultMessage += `${result.rank}. **${result.file}** (${result.language})\n`;
+                resultMessage += `   📍 Location: ${result.location}\n`;
+                resultMessage += `   🎯 Relevance: ${result.relevance}\n`;
+                resultMessage += `   📄 Code:\n\`\`\`${result.language}\n${result.content}\n\`\`\`\n\n`;
+            });
 
             if (isIndexing) {
-                resultMessage += `\n\n💡 **Tip**: This codebase is still being indexed. More results may become available as indexing progresses.`;
+                resultMessage += `💡 **Note**: Codebase is still indexing. Results may improve as more files are processed.\n`;
             }
 
             return {
@@ -720,6 +841,15 @@ export class ToolHandlers {
 
             const remainingIndexed = this.snapshotManager.getIndexedCodebases().length;
             const remainingIndexing = this.snapshotManager.getIndexingCodebases().length;
+
+            // Check if we should stop background sync (optimization: no need to run sync if no codebases)
+            if (remainingIndexed === 0 && remainingIndexing === 0 && this.syncManager) {
+                if (this.syncManager.isBackgroundSyncActive()) {
+                    console.log('[CLEAR] No codebases remaining. Stopping background sync for efficiency.');
+                    this.syncManager.stopBackgroundSync();
+                    resultText += '\n\n💡 Background sync stopped (no codebases to monitor)';
+                }
+            }
 
             if (remainingIndexed > 0 || remainingIndexing > 0) {
                 resultText += `\n${remainingIndexed} other indexed codebase(s) and ${remainingIndexing} indexing codebase(s) remain`;
