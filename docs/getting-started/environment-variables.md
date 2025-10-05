@@ -59,10 +59,26 @@ Claude Context supports a global configuration file at `~/.context/.env` to simp
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `HYBRID_MODE` | Enable hybrid search (BM25 + dense vector). Set to `false` for dense-only search | `true` |
-| `EMBEDDING_BATCH_SIZE` | Batch size for processing. Larger batch size means less indexing time | `100` |
+| `EMBEDDING_BATCH_SIZE` | Batch size for processing. Larger batch size means less indexing time | Provider-specific (100-1000) |
 | `SPLITTER_TYPE` | Code splitter type: `ast`, `langchain` | `ast` |
 | `CUSTOM_EXTENSIONS` | Additional file extensions to include (comma-separated, e.g., `.vue,.svelte,.astro`) | None |
 | `CUSTOM_IGNORE_PATTERNS` | Additional ignore patterns (comma-separated, e.g., `temp/**,*.backup,private/**`) | None |
+
+### Performance Optimization (Advanced)
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ENABLE_CONCURRENT_INDEXING` | Enable concurrent file processing and embedding generation | `true` |
+| `FILE_CONCURRENCY` | Number of files to process concurrently | CPU cores × 2 (max 20) |
+| `API_CONCURRENCY` | Number of concurrent API calls to embedding provider | Provider-specific (2-10) |
+| `MEMORY_LIMIT_MB` | Memory limit in MB for adaptive memory management | `1536` |
+| `ENABLE_PERFORMANCE_MONITORING` | Enable detailed performance monitoring and reporting | `false` |
+
+> **💡 Performance Tips:**
+> - **Concurrent Indexing**: Enabled by default for faster indexing. Set to `false` for legacy serial mode.
+> - **FILE_CONCURRENCY**: Higher values speed up file reading but increase memory usage. Adjust based on system resources.
+> - **API_CONCURRENCY**: Automatically tuned per provider. OpenAI=5, VoyageAI=3, Gemini=2, Ollama=10.
+> - **MEMORY_LIMIT_MB**: Triggers adaptive batch sizing when memory pressure is high. Increase for systems with more RAM.
+> - **Performance Monitoring**: Enable to see detailed metrics including pipeline overlap, throughput, and memory usage.
 
 ## 🚀 Quick Setup
 

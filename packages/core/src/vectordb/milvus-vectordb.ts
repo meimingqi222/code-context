@@ -24,6 +24,13 @@ export class MilvusVectorDatabase implements VectorDatabase {
     protected config: MilvusConfig;
     private client: MilvusClient | null = null;
     protected initializationPromise: Promise<void>;
+    
+    // Batch insertion optimization
+    private insertQueue: Map<string, VectorDocument[]> = new Map();
+    private insertQueueFlushThreshold: number = 5000; // Flush when queue reaches 5000 documents
+    private insertQueueFlushTimer: NodeJS.Timeout | null = null;
+    private insertQueueFlushInterval: number = 5000; // Auto-flush every 5 seconds
+    private isFlushingQueue: boolean = false;
 
     constructor(config: MilvusConfig) {
         this.config = config;
@@ -608,6 +615,92 @@ export class MilvusVectorDatabase implements VectorDatabase {
             collection_name: collectionName,
             data: data,
         });
+    }
+
+    /**
+     * Insert documents with batching optimization (queues documents for batch insertion)
+     * Use this for better performance during bulk indexing
+     */
+    async insertHybridBatched(collectionName: string, documents: VectorDocument[]): Promise<void> {
+        await this.ensureInitialized();
+        await this.ensureLoaded(collectionName);
+
+        // Add documents to queue
+        const existingQueue = this.insertQueue.get(collectionName) || [];
+        existingQueue.push(...documents);
+        this.insertQueue.set(collectionName, existingQueue);
+
+        console.log(`[MilvusDB] 📦 Queued ${documents.length} documents for collection '${collectionName}' (queue size: ${existingQueue.length})`);
+
+        // Start auto-flush timer if not already running
+        if (!this.insertQueueFlushTimer) {
+            this.insertQueueFlushTimer = setTimeout(() => {
+                this.flushInsertQueue().catch(error => {
+                    console.error(`[MilvusDB] ❌ Auto-flush failed:`, error);
+                });
+            }, this.insertQueueFlushInterval);
+        }
+
+        // Flush if threshold reached
+        if (existingQueue.length >= this.insertQueueFlushThreshold) {
+            await this.flushInsertQueue();
+        }
+    }
+
+    /**
+     * Flush all queued documents to database
+     */
+    async flushInsertQueue(): Promise<void> {
+        if (this.isFlushingQueue) {
+            console.log(`[MilvusDB] ⏳ Flush already in progress, skipping...`);
+            return;
+        }
+
+        if (this.insertQueue.size === 0) {
+            return;
+        }
+
+        this.isFlushingQueue = true;
+
+        // Clear auto-flush timer
+        if (this.insertQueueFlushTimer) {
+            clearTimeout(this.insertQueueFlushTimer);
+            this.insertQueueFlushTimer = null;
+        }
+
+        try {
+            console.log(`[MilvusDB] 🚀 Flushing insert queue: ${this.insertQueue.size} collections, ${Array.from(this.insertQueue.values()).reduce((sum, docs) => sum + docs.length, 0)} total documents`);
+            const startTime = Date.now();
+
+            // Flush each collection concurrently
+            const flushPromises = Array.from(this.insertQueue.entries()).map(async ([collectionName, documents]) => {
+                if (documents.length === 0) return;
+
+                try {
+                    console.log(`[MilvusDB] 💾 Inserting ${documents.length} documents to collection '${collectionName}'...`);
+                    await this.insertHybrid(collectionName, documents);
+                    console.log(`[MilvusDB] ✅ Inserted ${documents.length} documents to '${collectionName}'`);
+                } catch (error) {
+                    console.error(`[MilvusDB] ❌ Failed to flush collection '${collectionName}':`, error);
+                    throw error;
+                }
+            });
+
+            await Promise.all(flushPromises);
+
+            const flushTime = Date.now() - startTime;
+            const totalDocs = Array.from(this.insertQueue.values()).reduce((sum, docs) => sum + docs.length, 0);
+            console.log(`[MilvusDB] ✅ Flushed ${totalDocs} documents in ${flushTime}ms (${Math.round(totalDocs / (flushTime / 1000))} docs/sec)`);
+
+            // Clear queue
+            this.insertQueue.clear();
+
+        } catch (error) {
+            console.error(`[MilvusDB] ❌ Failed to flush insert queue:`, error);
+            throw error;
+        } finally {
+            this.isFlushingQueue = false;
+        }
     }
 
     async hybridSearch(collectionName: string, searchRequests: HybridSearchRequest[], options?: HybridSearchOptions): Promise<HybridSearchResult[]> {

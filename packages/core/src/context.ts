@@ -22,6 +22,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { FileSynchronizer } from './sync/synchronizer';
+import { PerformanceMonitor } from './utils/performance-monitor';
 
 const DEFAULT_SUPPORTED_EXTENSIONS = [
     // Programming languages
@@ -103,6 +104,7 @@ export class Context {
     private supportedExtensions: string[];
     private ignorePatterns: string[];
     private synchronizers = new Map<string, FileSynchronizer>();
+    private performanceMonitor: PerformanceMonitor | null = null;
 
     constructor(config: ContextConfig = {}) {
         // Initialize services
@@ -255,6 +257,14 @@ export class Context {
         const searchType = isHybrid === true ? 'hybrid search' : 'semantic search';
         const startTime = Date.now();
         
+        // Enable performance monitoring (disabled by default)
+        const enablePerfMonitoring = envManager.get('ENABLE_PERFORMANCE_MONITORING')?.toLowerCase() === 'true';
+        if (enablePerfMonitoring) {
+            this.performanceMonitor = new PerformanceMonitor();
+            this.performanceMonitor.start();
+            console.log(`[Context] 📊 Performance monitoring enabled`);
+        }
+        
         console.log(`[Context] 🚀 Starting optimized indexing with ${searchType}: ${codebasePath}`);
         console.log(`[Context] 🎯 System info: ${this.getSystemMemory()}MB total memory, ${require('os').cpus().length} CPU cores`);
 
@@ -339,11 +349,25 @@ export class Context {
             enhancedProgressCallback
         );
 
+        // 5. Flush any remaining batched documents to database
+        console.log(`[Context] 📦 Flushing remaining batched documents...`);
+        const milvusDB = this.vectorDatabase as any;
+        if (typeof milvusDB.flushInsertQueue === 'function') {
+            await milvusDB.flushInsertQueue();
+        }
+
         const totalTime = (Date.now() - startTime) / 1000;
         const avgThroughput = result.totalChunks / totalTime;
         
         console.log(`[Context] ✅ Optimized indexing completed!`);
         console.log(`[Context] 📊 Final stats: ${result.processedFiles} files, ${result.totalChunks} chunks, ${avgThroughput.toFixed(2)} chunks/sec, ${totalTime.toFixed(1)}s total`);
+
+        // Print performance summary if monitoring was enabled
+        if (this.performanceMonitor) {
+            this.performanceMonitor.finish();
+            this.performanceMonitor.printSummary();
+            this.performanceMonitor = null;
+        }
 
         progressCallback?.({
             phase: 'Indexing complete!',
@@ -421,6 +445,12 @@ export class Context {
                     updateProgress(`Indexed ${filePath} (${fileIndex}/${totalFiles})`);
                 }
             );
+        }
+
+        // Flush any remaining batched documents
+        const milvusDB = this.vectorDatabase as any;
+        if (typeof milvusDB.flushInsertQueue === 'function') {
+            await milvusDB.flushInsertQueue();
         }
 
         console.log(`[Context] ✅ Re-indexing complete. Added: ${added.length}, Removed: ${removed.length}, Modified: ${modified.length}`);
@@ -888,8 +918,10 @@ export class Context {
         FILE_CONCURRENCY: number
     ): Promise<{ processedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' }> {
         const isHybrid = this.getIsHybrid();
+        const API_CONCURRENCY = this.getAPIConcurrency();
         
         let chunkBuffer: Array<{ chunk: CodeChunk; codebasePath: string }> = [];
+        let pendingBuffers: Array<Array<{ chunk: CodeChunk; codebasePath: string }>> = [];
         let processedFiles = 0;
         let totalChunks = 0;
         let limitReached = false;
@@ -898,6 +930,7 @@ export class Context {
         const startTime = Date.now();
 
         console.log(`[Context] 🚀 Starting concurrent file processing with concurrency: ${FILE_CONCURRENCY}`);
+        console.log(`[Context] ⚡ Embedding API concurrency: ${API_CONCURRENCY}`);
 
         // Process files in concurrent batches
         for (let i = 0; i < filePaths.length && !limitReached; i += FILE_CONCURRENCY) {
@@ -907,6 +940,7 @@ export class Context {
             console.log(`[Context] 📦 Processing file batch ${Math.floor(i / FILE_CONCURRENCY) + 1}/${Math.ceil(filePaths.length / FILE_CONCURRENCY)}: ${batch.length} files`);
 
             // Process batch concurrently
+            const fileReadStart = Date.now();
             const results = await Promise.allSettled(
                 batch.map(async (filePath) => {
                     try {
@@ -929,6 +963,10 @@ export class Context {
 
             const batchTime = Date.now() - batchStartTime;
             console.log(`[Context] ⏱️  Batch completed in ${batchTime}ms (${(batchTime / batch.length).toFixed(0)}ms/file avg)`);
+            
+            // Record file read performance
+            const fileReadTime = Date.now() - fileReadStart;
+            this.performanceMonitor?.recordFileRead(fileReadTime, batch.length);
 
             // Process results
             for (const result of results) {
@@ -948,28 +986,56 @@ export class Context {
                         }
                     }
 
-                    // Process embedding batches as buffer fills
-                    if (chunkBuffer.length >= EMBEDDING_BATCH_SIZE || this.getMemoryUsage() > MEMORY_LIMIT_MB) {
+                    // Collect buffers for concurrent processing with adaptive threshold
+                    const currentMemoryUsage = this.getMemoryUsage();
+                    this.performanceMonitor?.recordMemory(currentMemoryUsage);
+                    const memoryPressure = currentMemoryUsage / MEMORY_LIMIT_MB;
+                    
+                    // Adaptive batch size: smaller batches when memory pressure is high
+                    const adaptiveBatchSize = memoryPressure > 0.8 
+                        ? Math.round(EMBEDDING_BATCH_SIZE * 0.5) 
+                        : EMBEDDING_BATCH_SIZE;
+                    
+                    if (chunkBuffer.length >= adaptiveBatchSize || memoryPressure > 0.9) {
+                        // Add current buffer to pending queue
+                        pendingBuffers.push([...chunkBuffer]);
+                        chunkBuffer = [];
                         batchCount++;
-                        try {
-                            const embeddingStart = Date.now();
-                            await this.processChunkBuffer(chunkBuffer);
-                            const embeddingTime = Date.now() - embeddingStart;
-                            
-                            if (embeddingTime > 30000) {
-                                console.log(`[Context] 🐌 Slow embedding batch detected (${embeddingTime}ms)`);
-                            }
-                        } catch (error) {
-                            const searchType = isHybrid === true ? 'hybrid' : 'regular';
-                            console.error(`[Context] ❌ Failed to process chunk batch ${batchCount} for ${searchType}:`, error);
-                        } finally {
-                            chunkBuffer = [];
-                            
-                            // Force garbage collection if memory is high
-                            if (this.getMemoryUsage() > MEMORY_LIMIT_MB * 0.8) {
-                                if (global.gc) {
-                                    global.gc();
+                        
+                        // Smoother processing: don't wait until we have full API_CONCURRENCY
+                        // Process in smaller batches when memory pressure is high
+                        const processingThreshold = memoryPressure > 0.8 
+                            ? Math.max(1, Math.floor(API_CONCURRENCY / 2))  // Process more frequently under memory pressure
+                            : API_CONCURRENCY;
+                        
+                        // Process pending buffers when threshold is reached
+                        if (pendingBuffers.length >= processingThreshold) {
+                            try {
+                                const concurrentStart = Date.now();
+                                const buffersToProcess = pendingBuffers.splice(0, API_CONCURRENCY);
+                                
+                                if (memoryPressure > 0.8) {
+                                    console.log(`[Context] ⚠️  High memory pressure (${Math.round(memoryPressure * 100)}%), processing ${buffersToProcess.length} batches immediately`);
                                 }
+                                
+                                await this.processChunkBuffersConcurrently(buffersToProcess, API_CONCURRENCY);
+                                const concurrentTime = Date.now() - concurrentStart;
+                                
+                                if (concurrentTime > 60000) {
+                                    console.log(`[Context] 🐌 Slow concurrent batch detected (${concurrentTime}ms for ${buffersToProcess.length} batches)`);
+                                }
+                                
+                                // Proactive GC after processing if memory is still high
+                                if (this.getMemoryUsage() > MEMORY_LIMIT_MB * 0.7 && global.gc) {
+                                    global.gc();
+                                    this.performanceMonitor?.recordGC();
+                                    const afterGC = this.getMemoryUsage();
+                                    console.log(`[Context] 🗑️  GC triggered: ${currentMemoryUsage}MB -> ${afterGC}MB`);
+                                }
+                            } catch (error) {
+                                const searchType = isHybrid === true ? 'hybrid' : 'regular';
+                                console.error(`[Context] ❌ Failed to process concurrent batches for ${searchType}:`, error);
+                                throw error; // Re-throw to prevent data loss
                             }
                         }
                     }
@@ -999,14 +1065,18 @@ export class Context {
             if (limitReached) break;
         }
 
-        // Process remaining chunks
+        // Process remaining chunks and pending buffers
         if (chunkBuffer.length > 0) {
+            pendingBuffers.push([...chunkBuffer]);
+        }
+        
+        if (pendingBuffers.length > 0) {
             const searchType = isHybrid === true ? 'hybrid' : 'regular';
-            console.log(`📝 Processing final batch of ${chunkBuffer.length} chunks for ${searchType}`);
+            console.log(`📝 Processing final ${pendingBuffers.length} batches concurrently for ${searchType}`);
             try {
-                await this.processChunkBuffer(chunkBuffer);
+                await this.processChunkBuffersConcurrently(pendingBuffers, API_CONCURRENCY);
             } catch (error) {
-                console.error(`[Context] ❌ Failed to process final chunk batch for ${searchType}:`, error);
+                console.error(`[Context] ❌ Failed to process final concurrent batches for ${searchType}:`, error);
             }
         }
 
@@ -1177,8 +1247,9 @@ export class Context {
     }
 
     /**
-     * Process multiple chunk buffers concurrently
-     * This enables concurrent API calls to embedding providers
+     * Process multiple chunk buffers concurrently with pipeline parallelism
+     * This enables concurrent API calls to embedding providers AND overlaps
+     * embedding generation with database insertion (pipeline parallelism)
      */
     private async processChunkBuffersConcurrently(
         chunkBuffers: Array<Array<{ chunk: CodeChunk; codebasePath: string }>>,
@@ -1186,44 +1257,171 @@ export class Context {
     ): Promise<void> {
         if (chunkBuffers.length === 0) return;
 
-        console.log(`[Context] 🚀 Processing ${chunkBuffers.length} embedding batches with concurrency: ${apiConcurrency}`);
+        console.log(`[Context] 🚀 Processing ${chunkBuffers.length} embedding batches with pipeline parallelism (concurrency: ${apiConcurrency})`);
         
-        // Process batches in concurrent groups
+        // Pipeline: Use a queue to manage embedding generation and DB insertion
+        // Stage 1: Generate embeddings (concurrent)
+        // Stage 2: Insert to DB (can start before all embeddings are done)
+        const dbInsertionQueue: Promise<void>[] = [];
+        
+        // Process batches in concurrent groups for embedding generation
         for (let i = 0; i < chunkBuffers.length; i += apiConcurrency) {
             const concurrentBatch = chunkBuffers.slice(i, i + apiConcurrency);
             const batchStartTime = Date.now();
             
-            // Process multiple embedding batches concurrently
-            await Promise.all(
-                concurrentBatch.map(async (buffer) => {
-                    try {
-                        await this.processChunkBuffer(buffer);
-                    } catch (error) {
-                        console.error(`[Context] ❌ Failed to process concurrent embedding batch:`, error);
-                        throw error; // Re-throw to maintain error handling
-                    }
-                })
-            );
+            // Generate embeddings concurrently
+            this.performanceMonitor?.recordConcurrentEmbeddings(concurrentBatch.length);
+            const embeddingPromises = concurrentBatch.map(async (buffer) => {
+                try {
+                    return await this.generateEmbeddingsForBuffer(buffer);
+                } catch (error) {
+                    console.error(`[Context] ❌ Failed to generate embeddings:`, error);
+                    throw error;
+                }
+            });
             
-            const batchTime = Date.now() - batchStartTime;
-            const batchesProcessed = Math.min(apiConcurrency, chunkBuffers.length - i);
-            console.log(`[Context] ⚡ Processed ${batchesProcessed} embedding batches concurrently in ${batchTime}ms (${(batchTime / batchesProcessed).toFixed(0)}ms/batch avg)`);
+            // Wait for embedding generation and immediately queue DB insertions
+            const embeddingResults = await Promise.all(embeddingPromises);
+            
+            const embeddingTime = Date.now() - batchStartTime;
+            console.log(`[Context] ⚡ Generated ${embeddingResults.length} embedding batches in ${embeddingTime}ms`);
+            
+            // Queue DB insertions (don't wait - pipeline parallelism!)
+            for (const { documents, collectionName, isHybrid } of embeddingResults) {
+                const insertPromise = this.insertDocumentsToDB(collectionName, documents, isHybrid)
+                    .catch(error => {
+                        console.error(`[Context] ❌ Failed to insert documents to DB:`, error);
+                        throw error;
+                    });
+                dbInsertionQueue.push(insertPromise);
+            }
+            
+            // Record concurrent DB inserts
+            this.performanceMonitor?.recordConcurrentDbInserts(dbInsertionQueue.length);
+            
+            // Limit the queue size to prevent memory buildup
+            // Wait for some DB insertions to complete if queue is too large
+            if (dbInsertionQueue.length >= apiConcurrency * 2) {
+                const completedInsertions = await Promise.allSettled(dbInsertionQueue.splice(0, apiConcurrency));
+                const failed = completedInsertions.filter(r => r.status === 'rejected');
+                if (failed.length > 0) {
+                    console.error(`[Context] ❌ ${failed.length} DB insertions failed`);
+                }
+            }
         }
+        
+        // Wait for all remaining DB insertions to complete
+        console.log(`[Context] 🏁 Waiting for ${dbInsertionQueue.length} remaining DB insertions...`);
+        const finalInsertions = await Promise.allSettled(dbInsertionQueue);
+        const failed = finalInsertions.filter(r => r.status === 'rejected');
+        if (failed.length > 0) {
+            console.error(`[Context] ❌ ${failed.length} final DB insertions failed`);
+            throw new Error(`Failed to insert ${failed.length} batches to database`);
+        }
+        console.log(`[Context] ✅ All DB insertions completed successfully`);
     }
 
     /**
-     * Process a batch of chunks
+     * Generate embeddings for a buffer of chunks (Stage 1 of pipeline)
+     * Returns prepared documents ready for DB insertion
      */
-    private async processChunkBatch(chunks: CodeChunk[], codebasePath: string): Promise<void> {
+    private async generateEmbeddingsForBuffer(
+        chunkBuffer: Array<{ chunk: CodeChunk; codebasePath: string }>
+    ): Promise<{ documents: VectorDocument[]; collectionName: string; isHybrid: boolean }> {
+        if (chunkBuffer.length === 0) {
+            throw new Error('Empty chunk buffer');
+        }
+
+        const chunks = chunkBuffer.map(item => item.chunk);
+        const codebasePath = chunkBuffer[0].codebasePath;
         const isHybrid = this.getIsHybrid();
 
         // Generate embedding vectors
         const chunkContents = chunks.map(chunk => chunk.content);
+        const embeddingStart = Date.now();
+        this.performanceMonitor?.markEmbeddingStageStart();
+        const embeddings = await this.embedding.embedBatch(chunkContents);
+        this.performanceMonitor?.markEmbeddingStageEnd();
+        const embeddingDuration = Date.now() - embeddingStart;
+        this.performanceMonitor?.recordEmbeddingBatch(embeddingDuration, chunks.length);
+
+        // Prepare documents (CPU-bound, fast)
+        const documents: VectorDocument[] = chunks.map((chunk, index) => {
+            if (!chunk.metadata.filePath) {
+                throw new Error(`Missing filePath in chunk metadata at index ${index}`);
+            }
+
+            const relativePath = path.relative(codebasePath, chunk.metadata.filePath);
+            const fileExtension = path.extname(chunk.metadata.filePath);
+            const { filePath, startLine, endLine, ...restMetadata } = chunk.metadata;
+
+            return {
+                id: this.generateId(relativePath, chunk.metadata.startLine || 0, chunk.metadata.endLine || 0, chunk.content),
+                content: chunk.content,
+                vector: embeddings[index].vector,
+                relativePath,
+                startLine: chunk.metadata.startLine || 0,
+                endLine: chunk.metadata.endLine || 0,
+                fileExtension,
+                metadata: {
+                    ...restMetadata,
+                    codebasePath,
+                    language: chunk.metadata.language || 'unknown',
+                    chunkIndex: index
+                }
+            };
+        });
+
+        const collectionName = this.getCollectionName(codebasePath);
+        return { documents, collectionName, isHybrid };
+    }
+
+    /**
+     * Insert documents to vector database (Stage 2 of pipeline)
+     * Can run concurrently with embedding generation of other batches
+     * Uses batched insertion for better performance
+     */
+    private async insertDocumentsToDB(
+        collectionName: string,
+        documents: VectorDocument[],
+        isHybrid: boolean
+    ): Promise<void> {
+        const dbStart = Date.now();
+        this.performanceMonitor?.markDbStageStart();
+        
+        if (isHybrid === true) {
+            // Use batched insertion if available (MilvusVectorDatabase)
+            const milvusDB = this.vectorDatabase as any;
+            if (typeof milvusDB.insertHybridBatched === 'function') {
+                await milvusDB.insertHybridBatched(collectionName, documents);
+            } else {
+                await this.vectorDatabase.insertHybrid(collectionName, documents);
+            }
+        } else {
+            await this.vectorDatabase.insert(collectionName, documents);
+        }
+        
+        this.performanceMonitor?.markDbStageEnd();
+        const dbDuration = Date.now() - dbStart;
+        this.performanceMonitor?.recordDbInsert(dbDuration, documents.length);
+    }
+
+    /**
+     * Process a batch of chunks with separated embedding and DB operations
+     * This allows for better parallelization
+     */
+    private async processChunkBatch(chunks: CodeChunk[], codebasePath: string): Promise<void> {
+        const isHybrid = this.getIsHybrid();
+
+        // Step 1: Generate embedding vectors (can be done concurrently with other batches)
+        const chunkContents = chunks.map(chunk => chunk.content);
         const embeddings = await this.embedding.embedBatch(chunkContents);
 
+        // Step 2: Prepare documents (CPU-bound, fast)
+        let documents: VectorDocument[];
+        
         if (isHybrid === true) {
-            // Create hybrid vector documents
-            const documents: VectorDocument[] = chunks.map((chunk, index) => {
+            documents = chunks.map((chunk, index) => {
                 if (!chunk.metadata.filePath) {
                     throw new Error(`Missing filePath in chunk metadata at index ${index}`);
                 }
@@ -1234,8 +1432,8 @@ export class Context {
 
                 return {
                     id: this.generateId(relativePath, chunk.metadata.startLine || 0, chunk.metadata.endLine || 0, chunk.content),
-                    content: chunk.content, // Full text content for BM25 and storage
-                    vector: embeddings[index].vector, // Dense vector
+                    content: chunk.content,
+                    vector: embeddings[index].vector,
                     relativePath,
                     startLine: chunk.metadata.startLine || 0,
                     endLine: chunk.metadata.endLine || 0,
@@ -1248,12 +1446,8 @@ export class Context {
                     }
                 };
             });
-
-            // Store to vector database
-            await this.vectorDatabase.insertHybrid(this.getCollectionName(codebasePath), documents);
         } else {
-            // Create regular vector documents
-            const documents: VectorDocument[] = chunks.map((chunk, index) => {
+            documents = chunks.map((chunk, index) => {
                 if (!chunk.metadata.filePath) {
                     throw new Error(`Missing filePath in chunk metadata at index ${index}`);
                 }
@@ -1278,9 +1472,14 @@ export class Context {
                     }
                 };
             });
+        }
 
-            // Store to vector database
-            await this.vectorDatabase.insert(this.getCollectionName(codebasePath), documents);
+        // Step 3: Store to vector database (I/O-bound, can overlap with other batches' embeddings)
+        const collectionName = this.getCollectionName(codebasePath);
+        if (isHybrid === true) {
+            await this.vectorDatabase.insertHybrid(collectionName, documents);
+        } else {
+            await this.vectorDatabase.insert(collectionName, documents);
         }
     }
 
