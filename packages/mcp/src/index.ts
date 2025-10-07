@@ -1,19 +1,28 @@
 #!/usr/bin/env node
 
-// CRITICAL: Redirect console outputs to stderr IMMEDIATELY to avoid interfering with MCP JSON protocol
+// CRITICAL: Initialize logger FIRST to capture all logs
+import { initLogger, getLogger } from './logger.js';
+
+// Initialize logger with environment variables
+const logger = initLogger();
+
+// Redirect console outputs to logger to avoid interfering with MCP JSON protocol
 // Only MCP protocol messages should go to stdout
 const originalConsoleLog = console.log;
 const originalConsoleWarn = console.warn;
+const originalConsoleError = console.error;
 
 console.log = (...args: any[]) => {
-    process.stderr.write('[LOG] ' + args.join(' ') + '\n');
+    logger.log(...args);
 };
 
 console.warn = (...args: any[]) => {
-    process.stderr.write('[WARN] ' + args.join(' ') + '\n');
+    logger.warn(...args);
 };
 
-// console.error already goes to stderr by default
+console.error = (...args: any[]) => {
+    logger.error(...args);
+};
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -267,6 +276,11 @@ Search your indexed codebase using natural language. Much more powerful than gre
     async start() {
         console.log('[SYNC-DEBUG] MCP server start() method called');
         console.log('Starting Context MCP server...');
+        
+        // Log file location info
+        const logger = getLogger();
+        console.log(`📁 Log directory: ${logger.getLogDir()}`);
+        console.log(`📝 Current log file: ${logger.getCurrentLogFile()}`);
 
         const transport = new StdioServerTransport();
         console.log('[SYNC-DEBUG] StdioServerTransport created, attempting server connection...');
@@ -299,21 +313,33 @@ async function main() {
 
     const server = new ContextMcpServer(config);
     await server.start();
+    
+    // Keep the process running - MCP server needs to stay alive
+    // The server will handle stdio communication and should not exit
+    // Return a promise that never resolves to keep the process alive
+    console.log('[SYNC-DEBUG] MCP server is now running and waiting for requests...');
+    return new Promise(() => {}); // Never resolves, keeps process alive
 }
 
 // Handle graceful shutdown
 process.on('SIGINT', () => {
     console.error("Received SIGINT, shutting down gracefully...");
+    getLogger().close();
     process.exit(0);
 });
 
 process.on('SIGTERM', () => {
     console.error("Received SIGTERM, shutting down gracefully...");
+    getLogger().close();
     process.exit(0);
 });
 
 // Always start the server - this is designed to be the main entry point
 main().catch((error) => {
     console.error("Fatal error:", error);
+    console.error("Fatal error type:", typeof error);
+    console.error("Fatal error stack:", error?.stack);
+    console.error("Fatal error message:", error?.message);
+    getLogger().close();
     process.exit(1);
 });
