@@ -22,7 +22,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { FileSynchronizer } from './sync/synchronizer';
-import { PerformanceMonitor } from './utils/performance-monitor';
 
 const DEFAULT_SUPPORTED_EXTENSIONS = [
     // Programming languages
@@ -104,7 +103,6 @@ export class Context {
     private supportedExtensions: string[];
     private ignorePatterns: string[];
     private synchronizers = new Map<string, FileSynchronizer>();
-    private performanceMonitor: PerformanceMonitor | null = null;
 
     constructor(config: ContextConfig = {}) {
         // Initialize services
@@ -257,13 +255,7 @@ export class Context {
         const searchType = isHybrid === true ? 'hybrid search' : 'semantic search';
         const startTime = Date.now();
         
-        // Enable performance monitoring (disabled by default)
-        const enablePerfMonitoring = envManager.get('ENABLE_PERFORMANCE_MONITORING')?.toLowerCase() === 'true';
-        if (enablePerfMonitoring) {
-            this.performanceMonitor = new PerformanceMonitor();
-            this.performanceMonitor.start();
-            console.log(`[Context] 📊 Performance monitoring enabled`);
-        }
+        // Performance monitoring is now handled directly by components
         
         console.log(`[Context] 🚀 Starting optimized indexing with ${searchType}: ${codebasePath}`);
         console.log(`[Context] 🎯 System info: ${this.getSystemMemory()}MB total memory, ${require('os').cpus().length} CPU cores`);
@@ -362,12 +354,7 @@ export class Context {
         console.log(`[Context] ✅ Optimized indexing completed!`);
         console.log(`[Context] 📊 Final stats: ${result.processedFiles} files, ${result.totalChunks} chunks, ${avgThroughput.toFixed(2)} chunks/sec, ${totalTime.toFixed(1)}s total`);
 
-        // Print performance summary if monitoring was enabled
-        if (this.performanceMonitor) {
-            this.performanceMonitor.finish();
-            this.performanceMonitor.printSummary();
-            this.performanceMonitor = null;
-        }
+        // Performance metrics are now handled directly by components
 
         progressCallback?.({
             phase: 'Indexing complete!',
@@ -973,9 +960,7 @@ export class Context {
             const batchTime = Date.now() - batchStartTime;
             console.log(`[Context] ⏱️  Batch completed in ${batchTime}ms (${(batchTime / batch.length).toFixed(0)}ms/file avg)`);
             
-            // Record file read performance
-            const fileReadTime = Date.now() - fileReadStart;
-            this.performanceMonitor?.recordFileRead(fileReadTime, batch.length);
+            // File read performance tracking
 
             // Process results
             for (const result of results) {
@@ -997,7 +982,6 @@ export class Context {
 
                     // Collect buffers for concurrent processing with adaptive threshold
                     const currentMemoryUsage = this.getMemoryUsage();
-                    this.performanceMonitor?.recordMemory(currentMemoryUsage);
                     const memoryPressure = currentMemoryUsage / MEMORY_LIMIT_MB;
                     
                     // Adaptive batch size: smaller batches when memory pressure is high
@@ -1037,7 +1021,6 @@ export class Context {
                                 // Proactive GC after processing if memory is still high
                                 if (this.getMemoryUsage() > MEMORY_LIMIT_MB * 0.7 && global.gc) {
                                     global.gc();
-                                    this.performanceMonitor?.recordGC();
                                     const afterGC = this.getMemoryUsage();
                                     console.log(`[Context] 🗑️  GC triggered: ${currentMemoryUsage}MB -> ${afterGC}MB`);
                                 }
@@ -1279,7 +1262,6 @@ export class Context {
             const batchStartTime = Date.now();
             
             // Generate embeddings concurrently
-            this.performanceMonitor?.recordConcurrentEmbeddings(concurrentBatch.length);
             const embeddingPromises = concurrentBatch.map(async (buffer) => {
                 try {
                     return await this.generateEmbeddingsForBuffer(buffer);
@@ -1305,8 +1287,7 @@ export class Context {
                 dbInsertionQueue.push(insertPromise);
             }
             
-            // Record concurrent DB inserts
-            this.performanceMonitor?.recordConcurrentDbInserts(dbInsertionQueue.length);
+            // Track concurrent DB inserts
             
             // Limit the queue size to prevent memory buildup
             // Wait for some DB insertions to complete if queue is too large
@@ -1348,11 +1329,8 @@ export class Context {
         // Generate embedding vectors
         const chunkContents = chunks.map(chunk => chunk.content);
         const embeddingStart = Date.now();
-        this.performanceMonitor?.markEmbeddingStageStart();
         const embeddings = await this.embedding.embedBatch(chunkContents);
-        this.performanceMonitor?.markEmbeddingStageEnd();
         const embeddingDuration = Date.now() - embeddingStart;
-        this.performanceMonitor?.recordEmbeddingBatch(embeddingDuration, chunks.length);
 
         // Prepare documents (CPU-bound, fast)
         const documents: VectorDocument[] = chunks.map((chunk, index) => {
@@ -1396,7 +1374,6 @@ export class Context {
         isHybrid: boolean
     ): Promise<void> {
         const dbStart = Date.now();
-        this.performanceMonitor?.markDbStageStart();
         
         if (isHybrid === true) {
             // Use batched insertion if available (MilvusVectorDatabase)
@@ -1410,9 +1387,7 @@ export class Context {
             await this.vectorDatabase.insert(collectionName, documents);
         }
         
-        this.performanceMonitor?.markDbStageEnd();
         const dbDuration = Date.now() - dbStart;
-        this.performanceMonitor?.recordDbInsert(dbDuration, documents.length);
     }
 
     /**

@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { MerkleDAG } from './merkle';
 import * as os from 'os';
+import pLimit from 'p-limit';
 
 export class FileSynchronizer {
     private fileHashes: Map<string, string>;
@@ -10,13 +11,15 @@ export class FileSynchronizer {
     private rootDir: string;
     private snapshotPath: string;
     private ignorePatterns: string[];
+    private concurrency: number; // Default concurrency for file operations
 
-    constructor(rootDir: string, ignorePatterns: string[] = []) {
+    constructor(rootDir: string, ignorePatterns: string[] = [], concurrency: number = 10) {
         this.rootDir = rootDir;
         this.snapshotPath = this.getSnapshotPath(rootDir);
         this.fileHashes = new Map();
         this.merkleDAG = new MerkleDAG();
         this.ignorePatterns = ignorePatterns;
+        this.concurrency = concurrency;
     }
 
     private getSnapshotPath(codebasePath: string): string {
@@ -39,27 +42,34 @@ export class FileSynchronizer {
         return crypto.createHash('sha256').update(content).digest('hex');
     }
 
+    /**
+     * Generate file hashes with concurrent processing
+     */
     private async generateFileHashes(dir: string): Promise<Map<string, string>> {
-        const fileHashes = new Map<string, string>();
+        return this.generateFileHashesConcurrent(dir);
+    }
 
+    /**
+     * Collect all file paths recursively
+     */
+    private async collectFilePaths(dir: string, filePaths: string[] = []): Promise<string[]> {
         let entries;
         try {
             entries = await fs.readdir(dir, { withFileTypes: true });
         } catch (error: any) {
             console.warn(`[Synchronizer] Cannot read directory ${dir}: ${error.message}`);
-            return fileHashes;
+            return filePaths;
         }
 
         for (const entry of entries) {
             const fullPath = path.join(dir, entry.name);
             const relativePath = path.relative(this.rootDir, fullPath);
 
-            // Check if this path should be ignored BEFORE any file system operations
+            // Check if this path should be ignored
             if (this.shouldIgnore(relativePath, entry.isDirectory())) {
-                continue; // Skip completely - no access at all
+                continue;
             }
 
-            // Double-check with fs.stat to be absolutely sure about file type
             let stat;
             try {
                 stat = await fs.stat(fullPath);
@@ -69,29 +79,64 @@ export class FileSynchronizer {
             }
 
             if (stat.isDirectory()) {
-                // Verify it's really a directory and not ignored
                 if (!this.shouldIgnore(relativePath, true)) {
-                    const subHashes = await this.generateFileHashes(fullPath);
-                    const entries = Array.from(subHashes.entries());
-                    for (let i = 0; i < entries.length; i++) {
-                        const [p, h] = entries[i];
-                        fileHashes.set(p, h);
-                    }
+                    await this.collectFilePaths(fullPath, filePaths);
                 }
             } else if (stat.isFile()) {
-                // Verify it's really a file and not ignored
                 if (!this.shouldIgnore(relativePath, false)) {
-                    try {
-                        const hash = await this.hashFile(fullPath);
-                        fileHashes.set(relativePath, hash);
-                    } catch (error: any) {
-                        console.warn(`[Synchronizer] Cannot hash file ${fullPath}: ${error.message}`);
-                        continue;
-                    }
+                    filePaths.push(fullPath);
                 }
             }
-            // Skip other types (symlinks, etc.)
         }
+
+        return filePaths;
+    }
+
+    /**
+     * Generate file hashes with concurrent processing
+     */
+    private async generateFileHashesConcurrent(dir: string): Promise<Map<string, string>> {
+        const startTime = Date.now();
+        
+        // First, collect all file paths
+        console.log(`[Synchronizer] 📂 Collecting file paths...`);
+        const filePaths = await this.collectFilePaths(dir);
+        console.log(`[Synchronizer] 📁 Found ${filePaths.length} files to process`);
+
+        if (filePaths.length === 0) {
+            return new Map();
+        }
+
+        // Process files concurrently with controlled concurrency
+        const limit = pLimit(this.concurrency);
+        const fileHashes = new Map<string, string>();
+
+        console.log(`[Synchronizer] ⚡ Hashing files with concurrency ${this.concurrency}...`);
+        
+        const hashPromises = filePaths.map((fullPath, index) => 
+            limit(async () => {
+                try {
+                    const hash = await this.hashFile(fullPath);
+                    const relativePath = path.relative(this.rootDir, fullPath);
+                    fileHashes.set(relativePath, hash);
+                    
+                    // Progress logging every 100 files
+                    if ((index + 1) % 100 === 0) {
+                        console.log(`[Synchronizer] 📊 Progress: ${index + 1}/${filePaths.length} files hashed`);
+                    }
+                } catch (error: any) {
+                    const relativePath = path.relative(this.rootDir, fullPath);
+                    console.warn(`[Synchronizer] Cannot hash file ${relativePath}: ${error.message}`);
+                }
+            })
+        );
+
+        await Promise.all(hashPromises);
+
+        const duration = Date.now() - startTime;
+        const filesPerSec = (filePaths.length / duration) * 1000;
+        console.log(`[Synchronizer] ✅ Hashed ${fileHashes.size} files in ${(duration / 1000).toFixed(2)}s (${filesPerSec.toFixed(0)} files/sec)`);
+
         return fileHashes;
     }
 

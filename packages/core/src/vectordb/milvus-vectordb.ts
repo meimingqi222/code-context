@@ -31,12 +31,53 @@ export class MilvusVectorDatabase implements VectorDatabase {
     private insertQueueFlushTimer: NodeJS.Timeout | null = null;
     private insertQueueFlushInterval: number = 5000; // Auto-flush every 5 seconds
     private isFlushingQueue: boolean = false;
+    
+    // Performance tracking
+    private insertMetrics = {
+        totalInserted: 0,
+        totalFlushes: 0,
+        totalFlushTimeMs: 0,
+        avgDocsPerFlush: 0
+    };
 
     constructor(config: MilvusConfig) {
         this.config = config;
 
         // Start initialization asynchronously without waiting
         this.initializationPromise = this.initialize();
+    }
+
+    /**
+     * Calculate optimal batch size based on document characteristics
+     * @param documents Array of documents
+     * @returns Optimal batch size
+     */
+    private calculateOptimalBatchSize(documents: VectorDocument[]): number {
+        if (documents.length === 0) return this.insertQueueFlushThreshold;
+
+        // Calculate average document size (content length + vector dimension)
+        const avgContentLength = documents.reduce((sum, doc) => sum + doc.content.length, 0) / documents.length;
+        const avgVectorDim = documents[0]?.vector?.length || 1536; // Default to common dimension
+
+        // Memory estimation: content (2 bytes per char) + vector (4 bytes per float)
+        const avgDocSizeMB = (avgContentLength * 2 + avgVectorDim * 4) / (1024 * 1024);
+
+        // Target ~50MB per batch for optimal performance
+        const targetBatchSizeMB = 50;
+        let optimalSize = Math.floor(targetBatchSizeMB / avgDocSizeMB);
+
+        // Clamp between reasonable bounds
+        optimalSize = Math.max(100, Math.min(optimalSize, 10000));
+
+        console.log(`[MilvusDB] 📊 Dynamic batch sizing: avg doc size=${avgDocSizeMB.toFixed(3)}MB, optimal batch=${optimalSize}`);
+        return optimalSize;
+    }
+
+    /**
+     * Get current insertion performance metrics
+     */
+    getInsertMetrics() {
+        return { ...this.insertMetrics };
     }
 
     private async initialize(): Promise<void> {
@@ -648,7 +689,7 @@ export class MilvusVectorDatabase implements VectorDatabase {
     }
 
     /**
-     * Flush all queued documents to database
+     * Flush all queued documents to database with dynamic batching
      */
     async flushInsertQueue(): Promise<void> {
         if (this.isFlushingQueue) {
@@ -669,17 +710,38 @@ export class MilvusVectorDatabase implements VectorDatabase {
         }
 
         try {
-            console.log(`[MilvusDB] 🚀 Flushing insert queue: ${this.insertQueue.size} collections, ${Array.from(this.insertQueue.values()).reduce((sum, docs) => sum + docs.length, 0)} total documents`);
+            const totalDocs = Array.from(this.insertQueue.values()).reduce((sum, docs) => sum + docs.length, 0);
+            console.log(`[MilvusDB] 🚀 Flushing insert queue: ${this.insertQueue.size} collections, ${totalDocs} total documents`);
             const startTime = Date.now();
 
-            // Flush each collection concurrently
+            // Flush each collection with dynamic batching
             const flushPromises = Array.from(this.insertQueue.entries()).map(async ([collectionName, documents]) => {
                 if (documents.length === 0) return;
 
                 try {
-                    console.log(`[MilvusDB] 💾 Inserting ${documents.length} documents to collection '${collectionName}'...`);
-                    await this.insertHybrid(collectionName, documents);
-                    console.log(`[MilvusDB] ✅ Inserted ${documents.length} documents to '${collectionName}'`);
+                    // Calculate optimal batch size for these documents
+                    const optimalBatchSize = this.calculateOptimalBatchSize(documents);
+                    
+                    // Split into optimal batches if needed
+                    if (documents.length > optimalBatchSize) {
+                        console.log(`[MilvusDB] 📦 Splitting ${documents.length} documents into batches of ${optimalBatchSize}`);
+                        const batches = [];
+                        for (let i = 0; i < documents.length; i += optimalBatchSize) {
+                            batches.push(documents.slice(i, i + optimalBatchSize));
+                        }
+                        
+                        // Insert batches sequentially to avoid overwhelming the database
+                        for (let i = 0; i < batches.length; i++) {
+                            const batch = batches[i];
+                            console.log(`[MilvusDB] 💾 Inserting batch ${i + 1}/${batches.length} (${batch.length} docs) to '${collectionName}'...`);
+                            await this.insertHybrid(collectionName, batch);
+                        }
+                        console.log(`[MilvusDB] ✅ Completed ${batches.length} batches for '${collectionName}'`);
+                    } else {
+                        console.log(`[MilvusDB] 💾 Inserting ${documents.length} documents to collection '${collectionName}'...`);
+                        await this.insertHybrid(collectionName, documents);
+                        console.log(`[MilvusDB] ✅ Inserted ${documents.length} documents to '${collectionName}'`);
+                    }
                 } catch (error) {
                     console.error(`[MilvusDB] ❌ Failed to flush collection '${collectionName}':`, error);
                     throw error;
@@ -689,8 +751,16 @@ export class MilvusVectorDatabase implements VectorDatabase {
             await Promise.all(flushPromises);
 
             const flushTime = Date.now() - startTime;
-            const totalDocs = Array.from(this.insertQueue.values()).reduce((sum, docs) => sum + docs.length, 0);
-            console.log(`[MilvusDB] ✅ Flushed ${totalDocs} documents in ${flushTime}ms (${Math.round(totalDocs / (flushTime / 1000))} docs/sec)`);
+            const docsPerSec = Math.round(totalDocs / (flushTime / 1000));
+            
+            // Update metrics
+            this.insertMetrics.totalInserted += totalDocs;
+            this.insertMetrics.totalFlushes++;
+            this.insertMetrics.totalFlushTimeMs += flushTime;
+            this.insertMetrics.avgDocsPerFlush = this.insertMetrics.totalInserted / this.insertMetrics.totalFlushes;
+            
+            console.log(`[MilvusDB] ✅ Flushed ${totalDocs} documents in ${flushTime}ms (${docsPerSec} docs/sec)`);
+            console.log(`[MilvusDB] 📊 Total inserted: ${this.insertMetrics.totalInserted}, Avg per flush: ${Math.round(this.insertMetrics.avgDocsPerFlush)}`);
 
             // Clear queue
             this.insertQueue.clear();
