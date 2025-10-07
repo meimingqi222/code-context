@@ -18,7 +18,7 @@ export class ToolHandlers {
         timestamp: number;
         cloudCodebases: Set<string>;
     } | null = null;
-    private readonly CLOUD_SYNC_CACHE_TTL = 60000; // 60秒缓存
+    private readonly CLOUD_SYNC_CACHE_TTL = 300000; // 5分钟缓存 (300秒)
 
     constructor(context: Context, snapshotManager: SnapshotManager, syncManager?: SyncManager) {
         this.context = context;

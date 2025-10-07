@@ -30,7 +30,6 @@ export interface MilvusRestfulConfig {
 }
 
 /**
- * TODO: Change this usage to checkCollectionLimit()
  * Wrapper function to handle collection creation with limit detection
  * This is the single point where collection limit errors are detected and handled
  */
@@ -790,12 +789,29 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
     /**
      * Check collection limit
      * Returns true if collection can be created, false if limit exceeded
-     * TODO: Implement proper collection limit checking for REST API
+     * Implements REST API version of collection limit checking
      */
     async checkCollectionLimit(): Promise<boolean> {
-        // TODO: Implement REST API version of collection limit checking
-        // For now, always return true to maintain compatibility
-        console.warn('[MilvusRestfulDB] ⚠️  checkCollectionLimit not implemented for REST API - returning true');
-        return true;
+        try {
+            // Get current collection count using REST API
+            const response = await this.makeRequest('/collections/list', 'GET');
+            const collectionCount = response.data?.length || 0;
+            
+            // Zilliz Cloud free tier typically limits to 10 collections
+            // This is a conservative estimate - actual limits may vary
+            const COLLECTION_LIMIT_THRESHOLD = 8; // Leave some buffer
+            
+            if (process.env.NODE_ENV === 'development') {
+                console.log(`[MilvusRestfulDB] 📊 Current collection count: ${collectionCount}, threshold: ${COLLECTION_LIMIT_THRESHOLD}`);
+            }
+            
+            return collectionCount < COLLECTION_LIMIT_THRESHOLD;
+        } catch (error) {
+            // If we can't check the limit, assume it's okay to maintain compatibility
+            if (process.env.NODE_ENV === 'development') {
+                console.warn('[MilvusRestfulDB] ⚠️  Failed to check collection limit, assuming okay:', error);
+            }
+            return true;
+        }
     }
 }

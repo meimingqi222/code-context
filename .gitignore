@@ -8,6 +8,10 @@ dist/
 build/
 *.tsbuildinfo
 
+# Build caches
+.webpack-cache/
+.node_modules/.cache/
+
 # Environment variables
 .env
 .env.local

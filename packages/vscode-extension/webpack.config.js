@@ -15,9 +15,12 @@ module.exports = {
     },
     cache: {
         type: 'filesystem',
+        cacheDirectory: path.resolve(__dirname, '../.webpack-cache'),
         buildDependencies: {
             config: [__filename]
-        }
+        },
+        maxAge: 604800000, // 7 days cache
+        compression: 'gzip'
     },
     devtool: 'nosources-source-map',
     externals: {

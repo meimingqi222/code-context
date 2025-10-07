@@ -884,7 +884,7 @@ export class Context {
         const optimalBatchSize = this.calculateOptimalBatchSize();
         const EMBEDDING_BATCH_SIZE = Math.max(10, optimalBatchSize);
         const CHUNK_LIMIT = 450000;
-        const MEMORY_LIMIT_MB = parseInt(envManager.get('MEMORY_LIMIT_MB') || '1536', 10);
+        const MEMORY_LIMIT_MB = parseInt(envManager.get('MEMORY_LIMIT_MB') || '2048', 10); // Increased from 1.5GB to 2GB
         const FILE_CONCURRENCY = this.getFileConcurrency();
         
         console.log(`[Context] 🔧 Optimized indexing - Batch size: ${EMBEDDING_BATCH_SIZE}, Memory limit: ${MEMORY_LIMIT_MB}MB, File concurrency: ${FILE_CONCURRENCY}`);
@@ -1501,10 +1501,10 @@ export class Context {
         
         // Provider-specific optimal batch sizes based on API limits and performance
         const providerOptimalSizes = {
-            'OpenAI': 1000,        // OpenAI supports up to 2048, but 1000 is safer for stability
-            'VoyageAI': 128,       // VoyageAI has stricter limits
-            'Gemini': 100,         // Gemini API limits
-            'Ollama': 50           // Local models, conservative for memory
+            'OpenAI': 1500,        // OpenAI supports up to 2048, increased for better throughput
+            'VoyageAI': 160,       // VoyageAI increased modestly for better performance
+            'Gemini': 140,         // Gemini API limits increased
+            'Ollama': 80           // Local models, increased for better efficiency
         };
 
         const optimalSize = providerOptimalSizes[provider as keyof typeof providerOptimalSizes] || 100;

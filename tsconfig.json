@@ -13,13 +13,13 @@
         "skipLibCheck": true,
         "forceConsistentCasingInFileNames": true,
         "moduleResolution": "node",
-        "composite": true,
+        "composite": true, // Enable project references for faster builds
         "resolveJsonModule": true,
         "allowSyntheticDefaultImports": true,
         "baseUrl": ".",
         "downlevelIteration": true,
         "incremental": true,
-        "tsBuildInfoFile": ".tsbuildinfo",
+        "tsBuildInfoFile": "./node_modules/.cache/.tsbuildinfo",
         "paths": {
             "@zilliz/claude-context-core": [
                 "./packages/core/src"

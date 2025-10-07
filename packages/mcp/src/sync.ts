@@ -15,24 +15,34 @@ export class SyncManager {
 
     public async handleSyncIndex(): Promise<void> {
         const syncStartTime = Date.now();
-        console.log(`[SYNC-DEBUG] handleSyncIndex() called at ${new Date().toISOString()}`);
+        if (process.env.NODE_ENV === 'development') {
+            console.log(`[SYNC-DEBUG] handleSyncIndex() called at ${new Date().toISOString()}`);
+        }
 
         const indexedCodebases = this.snapshotManager.getIndexedCodebases();
 
         if (indexedCodebases.length === 0) {
-            console.log('[SYNC-DEBUG] No codebases indexed. Skipping sync.');
+            if (process.env.NODE_ENV === 'development') {
+                console.log('[SYNC-DEBUG] No codebases indexed. Skipping sync.');
+            }
             return;
         }
 
-        console.log(`[SYNC-DEBUG] Found ${indexedCodebases.length} indexed codebases:`, indexedCodebases);
+        if (process.env.NODE_ENV === 'development') {
+            console.log(`[SYNC-DEBUG] Found ${indexedCodebases.length} indexed codebases:`, indexedCodebases);
+        }
 
         if (this.isSyncing) {
-            console.log('[SYNC-DEBUG] Index sync already in progress. Skipping.');
+            if (process.env.NODE_ENV === 'development') {
+                console.log('[SYNC-DEBUG] Index sync already in progress. Skipping.');
+            }
             return;
         }
 
         this.isSyncing = true;
-        console.log(`[SYNC-DEBUG] Starting index sync for all ${indexedCodebases.length} codebases...`);
+        if (process.env.NODE_ENV === 'development') {
+            console.log(`[SYNC-DEBUG] Starting index sync for all ${indexedCodebases.length} codebases...`);
+        }
 
         try {
             let totalStats = { added: 0, removed: 0, modified: 0 };
@@ -41,29 +51,41 @@ export class SyncManager {
                 const codebasePath = indexedCodebases[i];
                 const codebaseStartTime = Date.now();
 
-                console.log(`[SYNC-DEBUG] [${i + 1}/${indexedCodebases.length}] Starting sync for codebase: '${codebasePath}'`);
+                if (process.env.NODE_ENV === 'development') {
+                    console.log(`[SYNC-DEBUG] [${i + 1}/${indexedCodebases.length}] Starting sync for codebase: '${codebasePath}'`);
+                }
 
                 // Check if codebase path still exists
                 try {
                     const pathExists = fs.existsSync(codebasePath);
-                    console.log(`[SYNC-DEBUG] Codebase path exists: ${pathExists}`);
+                    if (process.env.NODE_ENV === 'development') {
+                        console.log(`[SYNC-DEBUG] Codebase path exists: ${pathExists}`);
+                    }
 
                     if (!pathExists) {
-                        console.warn(`[SYNC-DEBUG] Codebase path '${codebasePath}' no longer exists. Skipping sync.`);
+                        if (process.env.NODE_ENV === 'development') {
+                            console.warn(`[SYNC-DEBUG] Codebase path '${codebasePath}' no longer exists. Skipping sync.`);
+                        }
                         continue;
                     }
                 } catch (pathError: any) {
-                    console.error(`[SYNC-DEBUG] Error checking codebase path '${codebasePath}':`, pathError);
+                    if (process.env.NODE_ENV === 'development') {
+                        console.error(`[SYNC-DEBUG] Error checking codebase path '${codebasePath}':`, pathError);
+                    }
                     continue;
                 }
 
                 try {
-                    console.log(`[SYNC-DEBUG] Calling context.reindexByChange() for '${codebasePath}'`);
+                    if (process.env.NODE_ENV === 'development') {
+                        console.log(`[SYNC-DEBUG] Calling context.reindexByChange() for '${codebasePath}'`);
+                    }
                     const stats = await this.context.reindexByChange(codebasePath);
                     const codebaseElapsed = Date.now() - codebaseStartTime;
 
-                    console.log(`[SYNC-DEBUG] Reindex stats for '${codebasePath}':`, stats);
-                    console.log(`[SYNC-DEBUG] Codebase sync completed in ${codebaseElapsed}ms`);
+                    if (process.env.NODE_ENV === 'development') {
+                        console.log(`[SYNC-DEBUG] Reindex stats for '${codebasePath}':`, stats);
+                        console.log(`[SYNC-DEBUG] Codebase sync completed in ${codebaseElapsed}ms`);
+                    }
 
                     // Accumulate total stats
                     totalStats.added += stats.added;
@@ -77,8 +99,10 @@ export class SyncManager {
                     }
                 } catch (error: any) {
                     const codebaseElapsed = Date.now() - codebaseStartTime;
-                    console.error(`[SYNC-DEBUG] Error syncing codebase '${codebasePath}' after ${codebaseElapsed}ms:`, error);
-                    console.error(`[SYNC-DEBUG] Error stack:`, error.stack);
+                    if (process.env.NODE_ENV === 'development') {
+                        console.error(`[SYNC-DEBUG] Error syncing codebase '${codebasePath}' after ${codebaseElapsed}ms:`, error);
+                        console.error(`[SYNC-DEBUG] Error stack:`, error.stack);
+                    }
 
                     if (error.message.includes('Failed to query Milvus')) {
                         // Collection maybe deleted manually, delete the snapshot file
