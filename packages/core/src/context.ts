@@ -500,18 +500,27 @@ export class Context {
         }
 
         if (isHybrid === true) {
-            try {
-                // Check collection stats to see if it has data
-                const stats = await this.vectorDatabase.query(collectionName, '', ['id'], 1);
-                console.log(`[Context] 🔍 Collection '${collectionName}' exists and appears to have data`);
-            } catch (error) {
-                console.log(`[Context] ⚠️  Collection '${collectionName}' exists but may be empty or not properly indexed:`, error);
-            }
-
-            // 1. Generate query vector
-            console.log(`[Context] 🔍 Generating embeddings for query: "${query}"`);
-            const queryEmbedding: EmbeddingVector = await this.embedding.embed(query);
-            console.log(`[Context] ✅ Generated embedding vector with dimension: ${queryEmbedding.vector.length}`);
+            // ✅ 性能优化: 并行化 embedding 生成和 collection 检查
+            console.log(`[Context] ⚡ Parallel execution: generating embeddings + checking collection status...`);
+            const embeddingStartTime = Date.now();
+            
+            const [queryEmbedding, _] = await Promise.all([
+                // 1. Generate query vector (parallel)
+                this.embedding.embed(query),
+                // 2. Check collection stats (parallel)
+                (async () => {
+                    try {
+                        const stats = await this.vectorDatabase.query(collectionName, '', ['id'], 1);
+                        console.log(`[Context] 🔍 Collection '${collectionName}' exists and appears to have data`);
+                    } catch (error) {
+                        console.log(`[Context] ⚠️  Collection '${collectionName}' exists but may be empty or not properly indexed:`, error);
+                    }
+                })()
+            ]);
+            
+            const embeddingDuration = ((Date.now() - embeddingStartTime) / 1000).toFixed(2);
+            console.log(`[Context] ✅ Embedding generation completed in ${embeddingDuration}s`);
+            console.log(`[Context] 🔍 Generated embedding vector with dimension: ${queryEmbedding.vector.length}`);
             console.log(`[Context] 🔍 First 5 embedding values: [${queryEmbedding.vector.slice(0, 5).join(', ')}]`);
 
             // 2. Prepare hybrid search requests

@@ -12,6 +12,13 @@ export class ToolHandlers {
     private syncManager: SyncManager | null = null;
     private indexingStats: { indexedFiles: number; totalChunks: number } | null = null;
     private currentWorkspace: string;
+    
+    // 云端同步缓存机制 - 优化性能
+    private cloudSyncCache: {
+        timestamp: number;
+        cloudCodebases: Set<string>;
+    } | null = null;
+    private readonly CLOUD_SYNC_CACHE_TTL = 60000; // 60秒缓存
 
     constructor(context: Context, snapshotManager: SnapshotManager, syncManager?: SyncManager) {
         this.context = context;
@@ -91,7 +98,18 @@ export class ToolHandlers {
      */
     private async syncIndexedCodebasesFromCloud(): Promise<void> {
         try {
+            // ✅ 性能优化: 检查缓存是否有效
+            const now = Date.now();
+            if (this.cloudSyncCache && 
+                (now - this.cloudSyncCache.timestamp < this.CLOUD_SYNC_CACHE_TTL)) {
+                const cacheAge = ((now - this.cloudSyncCache.timestamp) / 1000).toFixed(1);
+                console.log(`[SYNC-CLOUD] ⚡ Using cached cloud sync data (age: ${cacheAge}s, TTL: ${this.CLOUD_SYNC_CACHE_TTL / 1000}s)`);
+                console.log(`[SYNC-CLOUD] 💾 Cached ${this.cloudSyncCache.cloudCodebases.size} codebases`);
+                return;
+            }
+            
             console.log(`[SYNC-CLOUD] 🔄 Syncing indexed codebases from Zilliz Cloud...`);
+            const syncStartTime = Date.now();
 
             // Get all collections using the interface method
             const vectorDb = this.context.getVectorDatabase();
@@ -195,8 +213,16 @@ export class ToolHandlers {
             } else {
                 console.log(`[SYNC-CLOUD] ✅ Local snapshot already matches cloud state`);
             }
-
-            console.log(`[SYNC-CLOUD] ✅ Cloud sync completed successfully`);
+            
+            // ✅ 性能优化: 更新缓存
+            this.cloudSyncCache = {
+                timestamp: Date.now(),
+                cloudCodebases: cloudCodebases
+            };
+            
+            const syncDuration = ((Date.now() - syncStartTime) / 1000).toFixed(2);
+            console.log(`[SYNC-CLOUD] ✅ Cloud sync completed successfully in ${syncDuration}s`);
+            console.log(`[SYNC-CLOUD] 💾 Cached result for ${this.CLOUD_SYNC_CACHE_TTL / 1000}s`);
         } catch (error: any) {
             console.error(`[SYNC-CLOUD] ❌ Error syncing codebases from cloud:`, error.message || error);
             // Don't throw - this is not critical for the main functionality
@@ -530,8 +556,15 @@ Ready to explore your codebase!`
         const resultLimit = limit || 10;
 
         try {
+            // 🕒 性能追踪: 总体搜索开始
+            const totalSearchStartTime = Date.now();
+            console.log(`[SEARCH-PERF] 🚀 Starting search for query: "${query}"`);
+            
             // Sync indexed codebases from cloud first
+            const syncStartTime = Date.now();
             await this.syncIndexedCodebasesFromCloud();
+            const syncDuration = ((Date.now() - syncStartTime) / 1000).toFixed(2);
+            console.log(`[SEARCH-PERF] ✅ Cloud sync completed in ${syncDuration}s`);
 
             // Smart path resolution
             const { resolvedPath: absolutePath, pathInfo } = this.smartPathResolution(codebasePath, 'search');
@@ -644,6 +677,7 @@ Ready to index this codebase?`
             }
 
             // Search in the actual indexed codebase (may be parent directory)
+            const searchStartTime = Date.now();
             const searchResults = await this.context.semanticSearch(
                 searchTargetPath,
                 query,
@@ -651,6 +685,8 @@ Ready to index this codebase?`
                 0.3,
                 filterExpr
             );
+            const searchDuration = ((Date.now() - searchStartTime) / 1000).toFixed(2);
+            console.log(`[SEARCH-PERF] ✅ Vector search completed in ${searchDuration}s`);
 
             console.log(`[SEARCH] ✅ Search completed! Found ${searchResults.length} results using ${embeddingProvider.getProvider()} embeddings`);
 
@@ -722,6 +758,11 @@ Ready to index this codebase?`
             if (isIndexing) {
                 resultMessage += `💡 **Note**: Codebase is still indexing. Results may improve as more files are processed.\n`;
             }
+            
+            // 🕒 性能追踪: 总体搜索完成
+            const totalDuration = ((Date.now() - totalSearchStartTime) / 1000).toFixed(2);
+            console.log(`[SEARCH-PERF] 🏁 Total search completed in ${totalDuration}s`);
+            console.log(`[SEARCH-PERF] 📊 Breakdown: Sync=${syncDuration}s, Search=${searchDuration}s, Other=${(parseFloat(totalDuration) - parseFloat(syncDuration) - parseFloat(searchDuration)).toFixed(2)}s`);
 
             return {
                 content: [{
@@ -833,6 +874,10 @@ Ready to index this codebase?`
 
             // Reset indexing stats if this was the active codebase
             this.indexingStats = null;
+            
+            // ✅ 性能优化: 清除缓存，因为云端状态已改变
+            this.cloudSyncCache = null;
+            console.log(`[CLEAR] 🗑️ Cleared cloud sync cache due to index change`);
 
             // Save snapshot after clearing index
             this.snapshotManager.saveCodebaseSnapshot();
