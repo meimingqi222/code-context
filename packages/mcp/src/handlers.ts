@@ -5,6 +5,7 @@ import { Context, COLLECTION_LIMIT_MESSAGE } from "@zilliz/claude-context-core";
 import { SnapshotManager } from "./snapshot.js";
 import { SyncManager } from "./sync.js";
 import { ensureAbsolutePath, truncateContent, trackCodebasePath, isPathIndexedOrNested, findIndexedParentDirectory } from "./utils.js";
+import { TextSearcher, TextSearchOptions } from "./text-search.js";
 
 export class ToolHandlers {
     private context: Context;
@@ -1071,7 +1072,6 @@ Ready to index this codebase?`
                     text: statusMessage + pathInfo
                 }]
             };
-
         } catch (error: any) {
             return {
                 content: [{
@@ -1082,4 +1082,131 @@ Ready to index this codebase?`
             };
         }
     }
-} 
+
+    /**
+     * Handle text search - high-performance grep alternative
+     */
+    public async handleTextSearch(args: any) {
+        const {
+            path: searchPath,
+            pattern,
+            caseSensitive = false,
+            isRegex = false,
+            filePattern,
+            maxResults = 100,
+            contextLines = 2,
+            respectGitignore = true
+        } = args;
+
+        try {
+            // Force absolute path resolution
+            const absolutePath = ensureAbsolutePath(searchPath);
+
+            // Validate path exists
+            if (!fs.existsSync(absolutePath)) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: `Error: Path '${absolutePath}' does not exist. Original input: '${searchPath}'`
+                    }],
+                    isError: true
+                };
+            }
+
+            // Check if it's a directory
+            const stat = fs.statSync(absolutePath);
+            if (!stat.isDirectory()) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: `Error: Path '${absolutePath}' is not a directory`
+                    }],
+                    isError: true
+                };
+            }
+
+            console.log(`[TEXT-SEARCH] Starting text search in: ${absolutePath}`);
+            console.log(`[TEXT-SEARCH] Pattern: "${pattern}"`);
+            console.log(`[TEXT-SEARCH] Case sensitive: ${caseSensitive}`);
+            console.log(`[TEXT-SEARCH] Is regex: ${isRegex}`);
+            console.log(`[TEXT-SEARCH] File pattern: ${filePattern || 'all files'}`);
+            console.log(`[TEXT-SEARCH] Max results: ${maxResults}`);
+            console.log(`[TEXT-SEARCH] Respect .gitignore: ${respectGitignore}`);
+
+            const searcher = new TextSearcher();
+            const options: TextSearchOptions = {
+                pattern,
+                caseSensitive,
+                isRegex,
+                filePattern,
+                maxResults,
+                contextLines,
+                respectGitignore
+            };
+
+            const result = await searcher.search(absolutePath, options);
+
+            console.log(`[TEXT-SEARCH] ✅ Search completed in ${result.duration}ms`);
+            console.log(`[TEXT-SEARCH] Found ${result.totalMatches} matches in ${result.filesSearched} files`);
+
+            if (result.totalMatches === 0) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: `No matches found for pattern "${pattern}" in '${absolutePath}'\n\nSearched ${result.filesSearched} files in ${result.duration}ms.`
+                    }]
+                };
+            }
+
+            // Format results
+            const formattedMatches = result.matches.map((match, index) => {
+                let output = `${index + 1}. ${match.file}:${match.line}:${match.column}\n`;
+
+                // Add context
+                if (match.beforeContext.length > 0) {
+                    match.beforeContext.forEach((line, i) => {
+                        const lineNum = match.line - match.beforeContext.length + i;
+                        output += `   ${lineNum} | ${line}\n`;
+                    });
+                }
+
+                // Add matched line (highlighted)
+                output += `=> ${match.line} | ${match.matchText}\n`;
+
+                if (match.afterContext.length > 0) {
+                    match.afterContext.forEach((line, i) => {
+                        const lineNum = match.line + i + 1;
+                        output += `   ${lineNum} | ${line}\n`;
+                    });
+                }
+
+                return output;
+            }).join('\n');
+
+            const pathInfo = searchPath !== absolutePath
+                ? `\nNote: Input path '${searchPath}' was resolved to absolute path '${absolutePath}'`
+                : '';
+
+            const limitInfo = result.totalMatches >= maxResults
+                ? `\n\n⚠️  Reached maximum result limit (${maxResults}). There may be more matches.`
+                : '';
+
+            return {
+                content: [{
+                    type: "text",
+                    text: `Found ${result.totalMatches} match(es) for "${pattern}" in ${result.filesSearched} file(s) (${result.duration}ms)${pathInfo}${limitInfo}\n\n${formattedMatches}`
+                }]
+            };
+
+        } catch (error: any) {
+            console.error('[TEXT-SEARCH] Error during text search:', error);
+            return {
+                content: [{
+                    type: "text",
+                    text: `Error during text search: ${error.message || error}`
+                }],
+                isError: true
+            };
+        }
+    }
+}

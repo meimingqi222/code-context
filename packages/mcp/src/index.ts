@@ -249,6 +249,77 @@ Search your indexed codebase using natural language. Much more powerful than gre
                             required: ["path"]
                         }
                     },
+                    {
+                        name: "text_grep",
+                        description: `High-performance cross-platform text search tool (grep alternative).
+
+🔍 **Key Features**:
+- ⚡ Concurrent file searching for 3-10x faster performance
+- 🌐 Cross-platform: Works on Windows, Linux, and macOS
+- 🎯 Smart filtering: Automatically respects .gitignore, .warpindexingignore, .claudeignore
+- 🚫 Auto-excludes: node_modules, dist, build, .git, and other common directories
+- 📝 Context lines: Shows surrounding code for better understanding
+- 🔢 Regex support: Use regular expressions for complex patterns
+- 📁 File filtering: Search only specific file types
+
+🎯 **When to Use**:
+- Finding specific variable names, function calls, or identifiers
+- Searching for error messages or log strings
+- Finding TODO/FIXME comments
+- Locating configuration values or constants
+- Pattern matching across multiple files
+
+💡 **Comparison**:
+- Use \`text_grep\` for literal string/pattern matching
+- Use \`search_code\` for semantic/meaning-based search
+
+⚠️ **IMPORTANT**: You MUST provide an absolute path.`,
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                path: {
+                                    type: "string",
+                                    description: "ABSOLUTE path to the directory to search in"
+                                },
+                                pattern: {
+                                    type: "string",
+                                    description: "Text pattern to search for. Can be literal text or regex if isRegex=true"
+                                },
+                                caseSensitive: {
+                                    type: "boolean",
+                                    description: "Whether the search should be case-sensitive",
+                                    default: false
+                                },
+                                isRegex: {
+                                    type: "boolean",
+                                    description: "Whether the pattern is a regular expression",
+                                    default: false
+                                },
+                                filePattern: {
+                                    type: "string",
+                                    description: "Optional: Glob pattern to filter files (e.g., '*.ts', '*.{js,jsx}', 'test*.py')"
+                                },
+                                maxResults: {
+                                    type: "number",
+                                    description: "Maximum number of matches to return",
+                                    default: 100,
+                                    maximum: 1000
+                                },
+                                contextLines: {
+                                    type: "number",
+                                    description: "Number of context lines to show before and after each match",
+                                    default: 2,
+                                    maximum: 10
+                                },
+                                respectGitignore: {
+                                    type: "boolean",
+                                    description: "Whether to respect .gitignore and other ignore files",
+                                    default: true
+                                }
+                            },
+                            required: ["path", "pattern"]
+                        }
+                    },
                 ]
             };
         });
@@ -266,6 +337,8 @@ Search your indexed codebase using natural language. Much more powerful than gre
                     return await this.toolHandlers.handleClearIndex(args);
                 case "get_indexing_status":
                     return await this.toolHandlers.handleGetIndexingStatus(args);
+                case "text_grep":
+                    return await this.toolHandlers.handleTextSearch(args);
 
                 default:
                     throw new Error(`Unknown tool: ${name}`);
