@@ -813,6 +813,19 @@ export class Context {
         
         // Provider-specific safe concurrency limits
         const provider = this.embedding.getProvider();
+        
+        // For OpenAI provider, check if using custom baseURL (e.g., Gitee AI)
+        if (provider === 'OpenAI') {
+            const openaiEmbedding = this.embedding as any;
+            const baseURL = openaiEmbedding.config?.baseURL;
+            
+            // If using custom API endpoint (not official OpenAI), use lower concurrency
+            if (baseURL && !baseURL.includes('api.openai.com')) {
+                console.log(`[Context] 🔧 Detected custom OpenAI endpoint (${baseURL}), using conservative concurrency: 2`);
+                return 2;
+            }
+        }
+        
         const providerConcurrency = {
             'OpenAI': 5,        // OpenAI: 3000 RPM limit
             'VoyageAI': 3,     // VoyageAI: 300 RPM limit  
@@ -1247,9 +1260,12 @@ export class Context {
         chunkBuffers: Array<Array<{ chunk: CodeChunk; codebasePath: string }>>,
         apiConcurrency: number
     ): Promise<void> {
-        if (chunkBuffers.length === 0) return;
+        // Filter out empty buffers to prevent API errors
+        const nonEmptyBuffers = chunkBuffers.filter(buffer => buffer.length > 0);
+        
+        if (nonEmptyBuffers.length === 0) return;
 
-        console.log(`[Context] 🚀 Processing ${chunkBuffers.length} embedding batches with pipeline parallelism (concurrency: ${apiConcurrency})`);
+        console.log(`[Context] 🚀 Processing ${nonEmptyBuffers.length} embedding batches with pipeline parallelism (concurrency: ${apiConcurrency})`);
         
         // Pipeline: Use a queue to manage embedding generation and DB insertion
         // Stage 1: Generate embeddings (concurrent)
@@ -1257,8 +1273,8 @@ export class Context {
         const dbInsertionQueue: Promise<void>[] = [];
         
         // Process batches in concurrent groups for embedding generation
-        for (let i = 0; i < chunkBuffers.length; i += apiConcurrency) {
-            const concurrentBatch = chunkBuffers.slice(i, i + apiConcurrency);
+        for (let i = 0; i < nonEmptyBuffers.length; i += apiConcurrency) {
+            const concurrentBatch = nonEmptyBuffers.slice(i, i + apiConcurrency);
             const batchStartTime = Date.now();
             
             // Generate embeddings concurrently
@@ -1474,9 +1490,17 @@ export class Context {
         const envBatchSize = parseInt(envManager.get('EMBEDDING_BATCH_SIZE') || '100', 10);
         const provider = this.embedding.getProvider();
         
+        // Check if using custom OpenAI endpoint (e.g., Gitee AI)
+        let isCustomEndpoint = false;
+        if (provider === 'OpenAI') {
+            const openaiEmbedding = this.embedding as any;
+            const baseURL = openaiEmbedding.config?.baseURL;
+            isCustomEndpoint = baseURL && !baseURL.includes('api.openai.com');
+        }
+        
         // Provider-specific optimal batch sizes based on API limits and performance
         const providerOptimalSizes = {
-            'OpenAI': 1500,        // OpenAI supports up to 2048, increased for better throughput
+            'OpenAI': isCustomEndpoint ? 25 : 1500,  // Custom endpoints (like Gitee AI) have lower limits
             'VoyageAI': 160,       // VoyageAI increased modestly for better performance
             'Gemini': 140,         // Gemini API limits increased
             'Ollama': 80           // Local models, increased for better efficiency
@@ -1486,11 +1510,17 @@ export class Context {
         const systemMemoryMB = this.getSystemMemory();
         
         // Adjust based on available memory (larger batches for systems with more memory)
-        const memoryMultiplier = systemMemoryMB > 8192 ? 1.5 : systemMemoryMB > 4096 ? 1.2 : 1.0;
+        // But respect custom endpoint limits
+        const memoryMultiplier = isCustomEndpoint ? 1.0 : (systemMemoryMB > 8192 ? 1.5 : systemMemoryMB > 4096 ? 1.2 : 1.0);
         const adjustedSize = Math.round(optimalSize * memoryMultiplier);
         
         const finalSize = Math.max(10, Math.min(envBatchSize, adjustedSize));
-        console.log(`[Context] 🎯 Calculated batch size: ${finalSize} (provider: ${provider}, system memory: ${systemMemoryMB}MB)`);
+        
+        if (isCustomEndpoint) {
+            console.log(`[Context] 🎯 Calculated batch size: ${finalSize} (provider: ${provider} [custom endpoint], limit: 25)`);
+        } else {
+            console.log(`[Context] 🎯 Calculated batch size: ${finalSize} (provider: ${provider}, system memory: ${systemMemoryMB}MB)`);
+        }
         
         return finalSize;
     }

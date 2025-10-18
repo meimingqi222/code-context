@@ -193,6 +193,7 @@ Environment Variables:
   Embedding Provider Configuration:
   EMBEDDING_PROVIDER      Embedding provider: OpenAI, VoyageAI, Gemini, Ollama (default: OpenAI)
   EMBEDDING_MODEL         Embedding model name (works for all providers)
+  MAX_EMBEDDING_BATCH_SIZE  Maximum texts per API call (default: 25 for custom endpoints, 2048 for OpenAI)
   
   Provider-specific API Keys:
   OPENAI_API_KEY          OpenAI API key (required for OpenAI provider)

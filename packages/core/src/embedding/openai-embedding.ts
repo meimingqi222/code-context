@@ -34,11 +34,20 @@ export class OpenAIEmbedding extends Embedding {
         // For custom models, make API call to detect dimension
         try {
             const processedText = this.preprocessText(testText);
-            const response = await this.client.embeddings.create({
+            
+            // Check if using custom baseURL
+            const isCustomEndpoint = this.config.baseURL && !this.config.baseURL.includes('api.openai.com');
+            
+            const requestParams: any = {
                 model: model,
                 input: processedText,
-                encoding_format: 'float',
-            });
+            };
+            
+            if (!isCustomEndpoint) {
+                requestParams.encoding_format = 'float';
+            }
+            
+            const response = await this.client.embeddings.create(requestParams);
             return response.data[0].embedding.length;
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -65,11 +74,19 @@ export class OpenAIEmbedding extends Embedding {
         }
 
         try {
-            const response = await this.client.embeddings.create({
+            // Check if using custom baseURL
+            const isCustomEndpoint = this.config.baseURL && !this.config.baseURL.includes('api.openai.com');
+            
+            const requestParams: any = {
                 model: model,
                 input: processedText,
-                encoding_format: 'float',
-            });
+            };
+            
+            if (!isCustomEndpoint) {
+                requestParams.encoding_format = 'float';
+            }
+            
+            const response = await this.client.embeddings.create(requestParams);
 
             // Update dimension from actual response
             this.dimension = response.data[0].embedding.length;
@@ -85,6 +102,58 @@ export class OpenAIEmbedding extends Embedding {
     }
 
     async embedBatch(texts: string[]): Promise<EmbeddingVector[]> {
+        // Handle empty array case to prevent API validation errors
+        if (texts.length === 0) {
+            console.warn('[OpenAIEmbedding] ⚠️ embedBatch called with empty array, returning empty result');
+            return [];
+        }
+
+        const processedTexts = this.preprocessTexts(texts);
+        const model = this.config.model || 'text-embedding-3-small';
+
+        // Check if using custom endpoint with batch size limit
+        const isCustomEndpoint = this.config.baseURL && !this.config.baseURL.includes('api.openai.com');
+        
+        // Smart default: use EMBEDDING_BATCH_SIZE as reference if set
+        const userBatchSize = process.env.EMBEDDING_BATCH_SIZE 
+            ? parseInt(process.env.EMBEDDING_BATCH_SIZE, 10) 
+            : 0;
+        
+        // Get max batch size with intelligent defaults
+        let maxBatchSize: number;
+        if (process.env.MAX_EMBEDDING_BATCH_SIZE) {
+            // Explicit override
+            maxBatchSize = parseInt(process.env.MAX_EMBEDDING_BATCH_SIZE, 10);
+        } else if (userBatchSize > 0) {
+            // Use EMBEDDING_BATCH_SIZE as reference, but respect API limits
+            maxBatchSize = Math.min(userBatchSize, isCustomEndpoint ? 25 : 2048);
+        } else {
+            // Auto-detect based on endpoint
+            maxBatchSize = isCustomEndpoint ? 25 : 2048;
+        }
+
+        // If batch is too large, split it into smaller chunks
+        if (processedTexts.length > maxBatchSize) {
+            console.log(`[OpenAIEmbedding] 📦 Splitting large batch (${processedTexts.length} texts) into chunks of ${maxBatchSize}`);
+            
+            const results: EmbeddingVector[] = [];
+            for (let i = 0; i < processedTexts.length; i += maxBatchSize) {
+                const chunk = texts.slice(i, i + maxBatchSize);  // Use original texts, not processed
+                console.log(`[OpenAIEmbedding] 📤 Processing chunk ${Math.floor(i / maxBatchSize) + 1}/${Math.ceil(processedTexts.length / maxBatchSize)}: ${chunk.length} texts`);
+                const chunkResults = await this.embedBatchInternal(chunk);
+                results.push(...chunkResults);
+            }
+            return results;
+        }
+
+        // Process single batch (≤ maxBatchSize)
+        return await this.embedBatchInternal(texts);
+    }
+
+    /**
+     * Internal method to process a single batch (without splitting)
+     */
+    private async embedBatchInternal(texts: string[]): Promise<EmbeddingVector[]> {
         const processedTexts = this.preprocessTexts(texts);
         const model = this.config.model || 'text-embedding-3-small';
 
@@ -96,11 +165,20 @@ export class OpenAIEmbedding extends Embedding {
         }
 
         try {
-            const response = await this.client.embeddings.create({
+            // Check if using custom baseURL (may not support encoding_format)
+            const isCustomEndpoint = this.config.baseURL && !this.config.baseURL.includes('api.openai.com');
+            
+            const requestParams: any = {
                 model: model,
                 input: processedTexts,
-                encoding_format: 'float',
-            });
+            };
+            
+            // Only add encoding_format for official OpenAI API
+            if (!isCustomEndpoint) {
+                requestParams.encoding_format = 'float';
+            }
+            
+            const response = await this.client.embeddings.create(requestParams);
 
             this.dimension = response.data[0].embedding.length;
 
@@ -110,6 +188,10 @@ export class OpenAIEmbedding extends Embedding {
             }));
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            console.error(`[OpenAIEmbedding] ❌ Batch embedding failed:`);
+            console.error(`   Model: ${model}`);
+            console.error(`   Texts count: ${processedTexts.length}`);
+            console.error(`   Sample text lengths: ${processedTexts.slice(0, 3).map(t => t.length)}`);
             throw new Error(`Failed to generate OpenAI batch embeddings: ${errorMessage}`);
         }
     }
