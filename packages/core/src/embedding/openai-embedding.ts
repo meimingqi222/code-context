@@ -35,17 +35,11 @@ export class OpenAIEmbedding extends Embedding {
         try {
             const processedText = this.preprocessText(testText);
             
-            // Check if using custom baseURL
-            const isCustomEndpoint = this.config.baseURL && !this.config.baseURL.includes('api.openai.com');
-            
             const requestParams: any = {
                 model: model,
                 input: processedText,
+                encoding_format: 'float'
             };
-            
-            if (!isCustomEndpoint) {
-                requestParams.encoding_format = 'float';
-            }
             
             const response = await this.client.embeddings.create(requestParams);
             return response.data[0].embedding.length;
@@ -74,19 +68,28 @@ export class OpenAIEmbedding extends Embedding {
         }
 
         try {
-            // Check if using custom baseURL
-            const isCustomEndpoint = this.config.baseURL && !this.config.baseURL.includes('api.openai.com');
-            
             const requestParams: any = {
                 model: model,
                 input: processedText,
+                encoding_format: 'float'
             };
             
-            if (!isCustomEndpoint) {
-                requestParams.encoding_format = 'float';
-            }
+            // Debug: log request
+            console.log(`[OpenAIEmbedding] 📤 Request params:`, JSON.stringify(requestParams, null, 2));
+            console.log(`[OpenAIEmbedding] 📤 Input text: "${processedText.substring(0, 100)}..."`);
             
             const response = await this.client.embeddings.create(requestParams);
+
+            // Debug: log response
+            console.log(`[OpenAIEmbedding] 📥 Response type:`, typeof response);
+            console.log(`[OpenAIEmbedding] 📥 Response data length: ${response.data.length}`);
+            console.log(`[OpenAIEmbedding] 📥 Embedding type:`, typeof response.data[0].embedding);
+            console.log(`[OpenAIEmbedding] 📥 Embedding is Array:`, Array.isArray(response.data[0].embedding));
+            console.log(`[OpenAIEmbedding] 📥 Embedding length: ${response.data[0].embedding.length}`);
+            console.log(`[OpenAIEmbedding] 📥 First value type:`, typeof response.data[0].embedding[0]);
+            console.log(`[OpenAIEmbedding] 📥 First 10 values: [${response.data[0].embedding.slice(0, 10).join(', ')}]`);
+            console.log(`[OpenAIEmbedding] 📥 Last 10 values: [${response.data[0].embedding.slice(-10).join(', ')}]`);
+            console.log(`[OpenAIEmbedding] 📥 Raw first value:`, response.data[0].embedding[0]);
 
             // Update dimension from actual response
             this.dimension = response.data[0].embedding.length;
@@ -171,12 +174,8 @@ export class OpenAIEmbedding extends Embedding {
             const requestParams: any = {
                 model: model,
                 input: processedTexts,
+                encoding_format: 'float'
             };
-            
-            // Only add encoding_format for official OpenAI API
-            if (!isCustomEndpoint) {
-                requestParams.encoding_format = 'float';
-            }
             
             const response = await this.client.embeddings.create(requestParams);
 
