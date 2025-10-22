@@ -54,6 +54,21 @@ Claude Context supports a global configuration file at `~/.context/.env` to simp
 | `OLLAMA_HOST` | Ollama server URL | `http://127.0.0.1:11434` |
 | `OLLAMA_MODEL`(alternative to `EMBEDDING_MODEL`) | Model name |  |
 
+### Logging Configuration
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `warn` |
+| `LOG_DIR` | Directory for log files | `~/.context/logs` |
+| `MAX_LOG_FILES` | Maximum number of log files to keep | `7` |
+| `MAX_LOG_SIZE_MB` | Maximum size per log file in MB | `10` |
+| `ENABLE_FILE_LOGGING` | Enable file logging. Set to `false` to disable | `true` |
+
+> **💡 Logging Tips:**
+> - **Default Level**: Set to `warn` to log warnings and errors while filtering out verbose info logs (~77% reduction)
+> - **Minimal Logging**: Set `LOG_LEVEL=error` to only log errors (maximum reduction)
+> - **Debug Mode**: Set `LOG_LEVEL=debug` for detailed debugging information (all logs)
+> - **Info Mode**: Set `LOG_LEVEL=info` for general operational logs (includes all non-debug logs)
+> - **Disable Logging**: Set `ENABLE_FILE_LOGGING=false` to completely disable file logging
 
 ### Advanced Configuration
 | Variable | Description | Default |

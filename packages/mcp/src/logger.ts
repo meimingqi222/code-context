@@ -2,12 +2,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
 export interface LoggerConfig {
     logDir?: string;
     maxLogFiles?: number;
     maxLogSizeMB?: number;
     enableFileLogging?: boolean;
-    logLevel?: 'debug' | 'info' | 'warn' | 'error';
+    logLevel?: LogLevel;
 }
 
 /**
@@ -21,10 +23,18 @@ export class Logger {
     private maxLogFiles: number;
     private maxLogSizeMB: number;
     private enableFileLogging: boolean;
-    private logLevel: string;
+    private logLevel: LogLevel;
     private currentLogFile: string;
     private logStream: fs.WriteStream | null = null;
     private currentLogSize: number = 0;
+    
+    // Log level priority mapping
+    private readonly logLevelPriority: Record<LogLevel, number> = {
+        'debug': 0,
+        'info': 1,
+        'warn': 2,
+        'error': 3
+    };
 
     constructor(config: LoggerConfig = {}) {
         // Default log directory: ~/.context/logs
@@ -32,7 +42,7 @@ export class Logger {
         this.maxLogFiles = config.maxLogFiles || 7; // Keep last 7 log files
         this.maxLogSizeMB = config.maxLogSizeMB || 10; // 10MB per log file
         this.enableFileLogging = config.enableFileLogging !== false; // Enabled by default
-        this.logLevel = config.logLevel || 'info';
+        this.logLevel = config.logLevel || 'warn'; // Default to warn level (includes warn + error)
         
         // Initialize log directory and file
         this.currentLogFile = this.getLogFileName();
@@ -152,9 +162,21 @@ export class Logger {
     }
 
     /**
+     * Check if a log level should be logged based on current log level setting
+     */
+    private shouldLog(level: LogLevel): boolean {
+        return this.logLevelPriority[level] >= this.logLevelPriority[this.logLevel];
+    }
+
+    /**
      * Write log message to both stderr and file
      */
-    private writeLog(level: string, prefix: string, message: string): void {
+    private writeLog(level: LogLevel, prefix: string, message: string): void {
+        // Filter logs based on log level
+        if (!this.shouldLog(level)) {
+            return;
+        }
+
         const timestamp = new Date().toISOString();
         const logMessage = `[${timestamp}] ${prefix} ${message}\n`;
 
@@ -216,7 +238,7 @@ export class Logger {
         const message = args.map(arg => 
             typeof arg === 'object' ? this.safeStringify(arg) : String(arg)
         ).join(' ');
-        this.writeLog('info', '[LOG]', message);
+        this.writeLog('info' as LogLevel, '[LOG]', message);
     }
 
     /**
@@ -226,7 +248,7 @@ export class Logger {
         const message = args.map(arg => 
             typeof arg === 'object' ? this.safeStringify(arg) : String(arg)
         ).join(' ');
-        this.writeLog('warn', '[WARN]', message);
+        this.writeLog('warn' as LogLevel, '[WARN]', message);
     }
 
     /**
@@ -236,19 +258,17 @@ export class Logger {
         const message = args.map(arg => 
             typeof arg === 'object' ? this.safeStringify(arg) : String(arg)
         ).join(' ');
-        this.writeLog('error', '[ERROR]', message);
+        this.writeLog('error' as LogLevel, '[ERROR]', message);
     }
 
     /**
-     * Log debug message (only if log level is debug)
+     * Log debug message
      */
     debug(...args: any[]): void {
-        if (this.logLevel === 'debug') {
-            const message = args.map(arg => 
-                typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
-            ).join(' ');
-            this.writeLog('debug', '[DEBUG]', message);
-        }
+        const message = args.map(arg => 
+            typeof arg === 'object' ? this.safeStringify(arg) : String(arg)
+        ).join(' ');
+        this.writeLog('debug' as LogLevel, '[DEBUG]', message);
     }
 
     /**
@@ -288,15 +308,21 @@ export function initLogger(config?: LoggerConfig): Logger {
     }
     
     // Read config from environment variables
+    const envLogLevel = process.env.LOG_LEVEL?.toLowerCase();
+    const validLogLevels: LogLevel[] = ['debug', 'info', 'warn', 'error'];
+    const logLevel: LogLevel | undefined = envLogLevel && validLogLevels.includes(envLogLevel as LogLevel) 
+        ? (envLogLevel as LogLevel) 
+        : undefined;
+    
     const envConfig: LoggerConfig = {
         logDir: process.env.LOG_DIR,
         maxLogFiles: process.env.MAX_LOG_FILES ? parseInt(process.env.MAX_LOG_FILES, 10) : undefined,
         maxLogSizeMB: process.env.MAX_LOG_SIZE_MB ? parseInt(process.env.MAX_LOG_SIZE_MB, 10) : undefined,
         enableFileLogging: process.env.ENABLE_FILE_LOGGING !== 'false',
-        logLevel: (process.env.LOG_LEVEL as any) || 'info'
+        logLevel: logLevel
     };
     
-    // Merge with provided config
+    // Merge with provided config (provided config takes precedence)
     const finalConfig = { ...envConfig, ...config };
     
     globalLogger = new Logger(finalConfig);
