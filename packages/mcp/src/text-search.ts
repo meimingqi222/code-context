@@ -1,7 +1,7 @@
-import * as fs from 'fs';
+import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { Worker } from 'worker_threads';
 import ignore from 'ignore';
 import micromatch from 'micromatch';
 
@@ -67,6 +67,18 @@ export class TextSearcher {
         '.cache/**'
     ];
 
+    // 二进制/无需搜索的文件扩展名
+    private readonly BINARY_EXTENSIONS = new Set([
+        '.exe', '.dll', '.so', '.dylib', '.bin',
+        '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.ico', '.webp',
+        '.mp3', '.mp4', '.avi', '.mov', '.wmv', '.flv',
+        '.zip', '.tar', '.gz', '.bz2', '.7z', '.rar',
+        '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+        '.wasm', '.pyc', '.pyo', '.o', '.a', '.lib',
+        '.ttf', '.woff', '.woff2', '.eot', '.otf',
+        '.map', '.lock'
+    ]);
+
     private ignoreFilter: ReturnType<typeof ignore> | null = null;
 
     /**
@@ -76,11 +88,11 @@ export class TextSearcher {
         const startTime = Date.now();
 
         // Validate path
-        if (!fs.existsSync(searchPath)) {
+        if (!fsSync.existsSync(searchPath)) {
             throw new Error(`Path does not exist: ${searchPath}`);
         }
 
-        const stat = fs.statSync(searchPath);
+        const stat = fsSync.statSync(searchPath);
         if (!stat.isDirectory()) {
             throw new Error(`Path is not a directory: ${searchPath}`);
         }
@@ -90,8 +102,8 @@ export class TextSearcher {
             await this.loadIgnorePatterns(searchPath);
         }
 
-        // Get all files to search
-        const files = await this.collectFiles(searchPath, options);
+        // 异步并发收集文件
+        const files = await this.collectFilesConcurrent(searchPath, options);
         console.log(`[TEXT-SEARCH] Found ${files.length} files to search`);
 
         if (files.length === 0) {
@@ -124,87 +136,110 @@ export class TextSearcher {
      */
     private async loadIgnorePatterns(basePath: string): Promise<void> {
         this.ignoreFilter = ignore();
-
-        // Add default ignore patterns
         this.ignoreFilter.add(this.DEFAULT_IGNORE_PATTERNS);
 
-        // Load .gitignore
-        const gitignorePath = path.join(basePath, '.gitignore');
-        if (fs.existsSync(gitignorePath)) {
-            const content = fs.readFileSync(gitignorePath, 'utf-8');
-            const patterns = content
-                .split('\n')
-                .map(line => line.trim())
-                .filter(line => line && !line.startsWith('#'));
-            this.ignoreFilter.add(patterns);
-            console.log(`[TEXT-SEARCH] Loaded ${patterns.length} patterns from .gitignore`);
-        }
+        // 并发读取所有忽略文件
+        const ignoreFiles = [
+            { name: '.gitignore', path: path.join(basePath, '.gitignore') },
+            { name: '.warpindexingignore', path: path.join(basePath, '.warpindexingignore') },
+            { name: '.claudeignore', path: path.join(basePath, '.claudeignore') }
+        ];
 
-        // Load .warpindexingignore
-        const warpIgnorePath = path.join(basePath, '.warpindexingignore');
-        if (fs.existsSync(warpIgnorePath)) {
-            const content = fs.readFileSync(warpIgnorePath, 'utf-8');
-            const patterns = content
-                .split('\n')
-                .map(line => line.trim())
-                .filter(line => line && !line.startsWith('#'));
-            this.ignoreFilter.add(patterns);
-            console.log(`[TEXT-SEARCH] Loaded ${patterns.length} patterns from .warpindexingignore`);
-        }
-
-        // Load .claudeignore
-        const claudeIgnorePath = path.join(basePath, '.claudeignore');
-        if (fs.existsSync(claudeIgnorePath)) {
-            const content = fs.readFileSync(claudeIgnorePath, 'utf-8');
-            const patterns = content
-                .split('\n')
-                .map(line => line.trim())
-                .filter(line => line && !line.startsWith('#'));
-            this.ignoreFilter.add(patterns);
-            console.log(`[TEXT-SEARCH] Loaded ${patterns.length} patterns from .claudeignore`);
-        }
+        await Promise.all(ignoreFiles.map(async ({ name, path: filePath }) => {
+            try {
+                const content = await fs.readFile(filePath, 'utf-8');
+                const patterns = content
+                    .split('\n')
+                    .map(line => line.trim())
+                    .filter(line => line && !line.startsWith('#'));
+                
+                if (patterns.length > 0) {
+                    this.ignoreFilter!.add(patterns);
+                    console.log(`[TEXT-SEARCH] Loaded ${patterns.length} patterns from ${name}`);
+                }
+            } catch {
+                // 文件不存在，忽略
+            }
+        }));
     }
 
     /**
-     * Recursively collect all files to search
+     * 异步并发收集文件
      */
-    private async collectFiles(
+    private async collectFilesConcurrent(
         dirPath: string,
         options: TextSearchOptions,
-        basePath: string = dirPath,
-        files: string[] = []
+        basePath: string = dirPath
     ): Promise<string[]> {
-        const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+        const files: string[] = [];
+        const dirsToProcess: string[] = [dirPath];
+        const concurrency = Math.max(8, os.cpus().length);
 
-        for (const entry of entries) {
-            const fullPath = path.join(dirPath, entry.name);
-            const relativePath = path.relative(basePath, fullPath);
+        while (dirsToProcess.length > 0) {
+            const batch = dirsToProcess.splice(0, concurrency);
+            const batchResults = await Promise.all(
+                batch.map(dir => this.processDirectory(dir, basePath, options))
+            );
 
-            // Skip hidden files/directories unless explicitly included
-            if (!options.includeHidden && entry.name.startsWith('.')) {
-                continue;
-            }
-
-            // Check ignore patterns
-            if (this.ignoreFilter && this.ignoreFilter.ignores(relativePath)) {
-                continue;
-            }
-
-            if (entry.isDirectory()) {
-                await this.collectFiles(fullPath, options, basePath, files);
-            } else if (entry.isFile()) {
-                // Apply file pattern filter if specified
-                if (options.filePattern) {
-                    if (micromatch.isMatch(entry.name, options.filePattern)) {
-                        files.push(fullPath);
-                    }
-                } else {
-                    files.push(fullPath);
-                }
+            for (const { files: dirFiles, subdirs } of batchResults) {
+                files.push(...dirFiles);
+                dirsToProcess.push(...subdirs);
             }
         }
 
         return files;
+    }
+
+    /**
+     * 处理单个目录（异步）
+     */
+    private async processDirectory(
+        dirPath: string,
+        basePath: string,
+        options: TextSearchOptions
+    ): Promise<{ files: string[]; subdirs: string[] }> {
+        const files: string[] = [];
+        const subdirs: string[] = [];
+
+        try {
+            const entries = await fs.readdir(dirPath, { withFileTypes: true });
+
+            for (const entry of entries) {
+                if (!options.includeHidden && entry.name.startsWith('.')) {
+                    continue;
+                }
+
+                const fullPath = path.join(dirPath, entry.name);
+                const relativePath = path.relative(basePath, fullPath);
+                const normalizedPath = relativePath.replace(/\\/g, '/');
+
+                if (this.ignoreFilter && this.ignoreFilter.ignores(normalizedPath)) {
+                    continue;
+                }
+
+                if (entry.isDirectory()) {
+                    subdirs.push(fullPath);
+                } else if (entry.isFile()) {
+                    // 扩展名预过滤
+                    const ext = path.extname(entry.name).toLowerCase();
+                    if (this.BINARY_EXTENSIONS.has(ext)) {
+                        continue;
+                    }
+
+                    if (options.filePattern) {
+                        if (!micromatch.isMatch(entry.name, options.filePattern)) {
+                            continue;
+                        }
+                    }
+
+                    files.push(fullPath);
+                }
+            }
+        } catch (error: any) {
+            console.warn(`[TEXT-SEARCH] Error reading directory ${dirPath}: ${error.message}`);
+        }
+
+        return { files, subdirs };
     }
 
     /**
@@ -235,9 +270,10 @@ export class TextSearcher {
         const maxResults = options.maxResults || Infinity;
         const contextLines = options.contextLines || 0;
 
-        // Use concurrent processing with batching
-        const batchSize = 50;
-        const concurrency = Math.min(4, Math.max(1, os.cpus().length - 1));
+        // 自适应批次大小和并发度
+        const totalFiles = files.length;
+        const batchSize = totalFiles > 10000 ? 200 : totalFiles > 1000 ? 100 : 50;
+        const concurrency = Math.max(8, os.cpus().length * 2);
 
         for (let i = 0; i < files.length && matches.length < maxResults; i += batchSize) {
             const batch = files.slice(i, Math.min(i + batchSize, files.length));
@@ -257,6 +293,12 @@ export class TextSearcher {
                 if (matches.length >= maxResults) {
                     break;
                 }
+            }
+
+            // 进度报告
+            if (i % (batchSize * 10) === 0 && i > 0) {
+                const progress = ((i / files.length) * 100).toFixed(1);
+                console.log(`[TEXT-SEARCH] Progress: ${progress}% (${i}/${files.length} files, ${matches.length} matches)`);
             }
         }
 
@@ -281,19 +323,22 @@ export class TextSearcher {
             }
 
             try {
-                // Check file size (skip very large files)
-                const stat = fs.statSync(file);
-                if (stat.size > 10 * 1024 * 1024) { // Skip files > 10MB
+                // 获取文件大小
+                const stat = await fs.stat(file);
+                if (stat.size > 10 * 1024 * 1024) {
                     console.log(`[TEXT-SEARCH] Skipping large file: ${file} (${(stat.size / 1024 / 1024).toFixed(2)}MB)`);
                     continue;
                 }
 
-                // Check if file is binary
-                if (this.isBinaryFile(file)) {
+                if (stat.size === 0) {
                     continue;
                 }
 
-                const content = fs.readFileSync(file, 'utf-8');
+                // 读取文件内容并检查二进制
+                const content = await fs.readFile(file, 'utf-8');
+                if (content.includes('\0')) {
+                    continue;
+                }
                 const lines = content.split('\n');
 
                 for (let i = 0; i < lines.length && matches.length < remainingResults; i++) {
@@ -324,34 +369,13 @@ export class TextSearcher {
                     }
                 }
             } catch (error: any) {
-                // Skip files that can't be read
-                console.warn(`[TEXT-SEARCH] Error reading file ${file}: ${error.message}`);
+                // 跳过无法读取的文件
+                if (!error.message.includes('ENOENT')) {
+                    console.warn(`[TEXT-SEARCH] Error reading file ${file}: ${error.message}`);
+                }
             }
         }
 
         return matches;
-    }
-
-    /**
-     * Check if file is binary (simple heuristic)
-     */
-    private isBinaryFile(filePath: string): boolean {
-        try {
-            const buffer = Buffer.alloc(512);
-            const fd = fs.openSync(filePath, 'r');
-            const bytesRead = fs.readSync(fd, buffer, 0, 512, 0);
-            fs.closeSync(fd);
-
-            // Check for null bytes (common in binary files)
-            for (let i = 0; i < bytesRead; i++) {
-                if (buffer[i] === 0) {
-                    return true;
-                }
-            }
-
-            return false;
-        } catch {
-            return false;
-        }
     }
 }
