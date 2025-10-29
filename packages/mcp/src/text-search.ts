@@ -339,7 +339,8 @@ export class TextSearcher {
                 if (content.includes('\0')) {
                     continue;
                 }
-                const lines = content.split('\n');
+                // 使用正则表达式正确处理 Windows (CRLF) 和 Unix (LF) 换行符
+                const lines = content.split(/\r?\n/);
 
                 for (let i = 0; i < lines.length && matches.length < remainingResults; i++) {
                     const line = lines[i];
