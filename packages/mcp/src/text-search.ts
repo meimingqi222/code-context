@@ -135,6 +135,8 @@ export class TextSearcher {
      * Load .gitignore and other ignore files
      */
     private async loadIgnorePatterns(basePath: string): Promise<void> {
+        // 使用 ignore 库的默认配置，它自动处理跨平台路径
+        // ignore 库在内部会根据操作系统正确处理路径分隔符
         this.ignoreFilter = ignore();
         this.ignoreFilter.add(this.DEFAULT_IGNORE_PATTERNS);
 
@@ -211,9 +213,13 @@ export class TextSearcher {
 
                 const fullPath = path.join(dirPath, entry.name);
                 const relativePath = path.relative(basePath, fullPath);
-                const normalizedPath = relativePath.replace(/\\/g, '/');
-
-                if (this.ignoreFilter && this.ignoreFilter.ignores(normalizedPath)) {
+                
+                // 跨平台路径处理：直接使用 path.relative() 的结果
+                // ignore 库会自动处理不同操作系统的路径分隔符
+                // 不需要手动转换路径分隔符，这可能导致模式匹配失效
+                
+                if (this.ignoreFilter && this.ignoreFilter.ignores(relativePath)) {
+                    console.log(`[TEXT-SEARCH] Ignoring file (matched pattern): ${relativePath}`);
                     continue;
                 }
 
