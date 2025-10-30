@@ -1095,7 +1095,8 @@ Ready to index this codebase?`
             filePattern,
             maxResults = 100,
             contextLines = 2,
-            respectGitignore = true
+            respectGitignore = true,
+            timeout = 10000 // 默认10秒超时
         } = args;
 
         try {
@@ -1141,7 +1142,8 @@ Ready to index this codebase?`
                 filePattern,
                 maxResults,
                 contextLines,
-                respectGitignore
+                respectGitignore,
+                timeout
             };
 
             const result = await searcher.search(absolutePath, options);

@@ -315,6 +315,13 @@ Search your indexed codebase using natural language. Much more powerful than gre
                                     type: "boolean",
                                     description: "Whether to respect .gitignore and other ignore files",
                                     default: true
+                                },
+                                timeout: {
+                                    type: "number",
+                                    description: "Search timeout in milliseconds (default: 10000)",
+                                    default: 10000,
+                                    minimum: 1000,
+                                    maximum: 60000
                                 }
                             },
                             required: ["path", "pattern"]

@@ -14,6 +14,7 @@ export interface TextSearchOptions {
     contextLines?: number;
     respectGitignore?: boolean;
     includeHidden?: boolean;
+    timeout?: number; // 添加超时选项（毫秒）
 }
 
 export interface SearchMatch {
@@ -86,6 +87,42 @@ export class TextSearcher {
      */
     async search(searchPath: string, options: TextSearchOptions): Promise<SearchResult> {
         const startTime = Date.now();
+        const timeoutMs = options.timeout || 10000; // 默认10秒超时
+        console.log(`[TEXT-SEARCH] 🔍 Starting search performance analysis (timeout: ${timeoutMs}ms)`);
+
+        // 创建超时Promise
+        const timeoutPromise = new Promise<SearchResult>((_, reject) => {
+            setTimeout(() => {
+                reject(new Error(`Search timeout after ${timeoutMs}ms`));
+            }, timeoutMs);
+        });
+
+        // 创建实际搜索的Promise
+        const searchPromise = this.doSearch(searchPath, options, startTime);
+
+        try {
+            // 使用Promise.race来实现超时
+            return await Promise.race([searchPromise, timeoutPromise]);
+        } catch (error: any) {
+            if (error.message.includes('timeout')) {
+                const duration = Date.now() - startTime;
+                console.log(`[TEXT-SEARCH] ⏰ SEARCH TIMEOUT: ${duration}ms`);
+                return {
+                    matches: [],
+                    totalMatches: 0,
+                    filesSearched: 0,
+                    duration
+                };
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * 实际执行搜索的方法
+     */
+    private async doSearch(searchPath: string, options: TextSearchOptions, startTime: number): Promise<SearchResult> {
+        console.log(`[TEXT-SEARCH] 🔍 Starting actual search implementation`);
 
         // Validate path
         if (!fsSync.existsSync(searchPath)) {
@@ -98,13 +135,23 @@ export class TextSearcher {
         }
 
         // Load ignore patterns
+        const ignoreStartTime = Date.now();
         if (options.respectGitignore !== false) {
             await this.loadIgnorePatterns(searchPath);
         }
+        const ignoreDuration = Date.now() - ignoreStartTime;
+        console.log(`[TEXT-SEARCH] ⏱️  Ignore patterns loaded in ${ignoreDuration}ms`);
 
         // 异步并发收集文件
+        const collectStartTime = Date.now();
         const files = await this.collectFilesConcurrent(searchPath, options);
-        console.log(`[TEXT-SEARCH] Found ${files.length} files to search`);
+        const collectDuration = Date.now() - collectStartTime;
+        console.log(`[TEXT-SEARCH] ⏱️  File collection completed in ${collectDuration}ms - Found ${files.length} files`);
+        
+        // 如果文件收集就花了很长时间，这就是主要瓶颈
+        if (collectDuration > 5000) {
+            console.log(`[TEXT-SEARCH] 🚨 BOTTLENECK DETECTED: File collection took ${collectDuration}ms`);
+        }
 
         if (files.length === 0) {
             return {
@@ -119,15 +166,24 @@ export class TextSearcher {
         const searchRegex = this.createSearchRegex(options);
 
         // Search files concurrently
+        const searchStartTime = Date.now();
         const matches = await this.searchFiles(files, searchPath, searchRegex, options);
+        const searchDuration = Date.now() - searchStartTime;
+        console.log(`[TEXT-SEARCH] ⏱️  File search completed in ${searchDuration}ms - Found ${matches.length} matches`);
+        
+        // 如果文件搜索花了很长时间，这是另一个瓶颈
+        if (searchDuration > 5000) {
+            console.log(`[TEXT-SEARCH] 🚨 BOTTLENECK DETECTED: File search took ${searchDuration}ms`);
+        }
 
-        const duration = Date.now() - startTime;
+        const totalDuration = Date.now() - startTime;
+        console.log(`[TEXT-SEARCH] ✅ Total search completed in ${totalDuration}ms (Ignore: ${ignoreDuration}ms, Collect: ${collectDuration}ms, Search: ${searchDuration}ms)`);
 
         return {
             matches,
             totalMatches: matches.length,
             filesSearched: files.length,
-            duration
+            duration: totalDuration
         };
     }
 
@@ -166,29 +222,57 @@ export class TextSearcher {
     }
 
     /**
-     * 异步并发收集文件
+     * 简化的文件收集 - 先确保基本功能正常
      */
     private async collectFilesConcurrent(
         dirPath: string,
         options: TextSearchOptions,
         basePath: string = dirPath
     ): Promise<string[]> {
+        console.log(`[TEXT-SEARCH] 📁 Starting simplified file collection`);
         const files: string[] = [];
-        const dirsToProcess: string[] = [dirPath];
-        const concurrency = Math.max(8, os.cpus().length);
+        
+        // 使用简单的递归遍历，避免复杂的并发逻辑
+        const collectFiles = async (dir: string): Promise<void> => {
+            try {
+                const entries = await fs.readdir(dir, { withFileTypes: true });
+                
+                for (const entry of entries) {
+                    if (!options.includeHidden && entry.name.startsWith('.')) {
+                        continue;
+                    }
 
-        while (dirsToProcess.length > 0) {
-            const batch = dirsToProcess.splice(0, concurrency);
-            const batchResults = await Promise.all(
-                batch.map(dir => this.processDirectory(dir, basePath, options))
-            );
+                    const fullPath = path.join(dir, entry.name);
+                    const relativePath = path.relative(basePath, fullPath);
+                    
+                    // 简单的 ignore 过滤
+                    if (this.ignoreFilter && this.ignoreFilter.ignores(relativePath)) {
+                        continue;
+                    }
 
-            for (const { files: dirFiles, subdirs } of batchResults) {
-                files.push(...dirFiles);
-                dirsToProcess.push(...subdirs);
+                    if (entry.isDirectory()) {
+                        // 递归处理子目录，但限制深度
+                        const depth = relativePath.split('/').length;
+                        if (depth < 10) { // 限制深度防止无限递归
+                            await collectFiles(fullPath);
+                        }
+                    } else if (entry.isFile()) {
+                        // 简单的文件过滤
+                        const ext = path.extname(entry.name).toLowerCase();
+                        if (!this.BINARY_EXTENSIONS.has(ext)) {
+                            if (!options.filePattern || micromatch.isMatch(entry.name, options.filePattern)) {
+                                files.push(fullPath);
+                            }
+                        }
+                    }
+                }
+            } catch (error: any) {
+                console.warn(`[TEXT-SEARCH] Error reading directory ${dir}: ${error.message}`);
             }
-        }
-
+        };
+        
+        await collectFiles(dirPath);
+        console.log(`[TEXT-SEARCH] 📁 Simplified collection completed: ${files.length} files`);
         return files;
     }
 
@@ -204,7 +288,14 @@ export class TextSearcher {
         const subdirs: string[] = [];
 
         try {
+            const dirStartTime = Date.now();
             const entries = await fs.readdir(dirPath, { withFileTypes: true });
+            const readDuration = Date.now() - dirStartTime;
+            
+            // 如果单个目录读取就很慢，记录下来
+            if (readDuration > 100) {
+                console.log(`[TEXT-SEARCH] 🐌 Slow directory read: ${dirPath} took ${readDuration}ms for ${entries.length} entries`);
+            }
 
             for (const entry of entries) {
                 if (!options.includeHidden && entry.name.startsWith('.')) {
@@ -264,7 +355,7 @@ export class TextSearcher {
     }
 
     /**
-     * Search files concurrently using multiple strategies
+     * 高效并发搜索文件 - 简化批处理逻辑
      */
     private async searchFiles(
         files: string[],
@@ -276,24 +367,29 @@ export class TextSearcher {
         const maxResults = options.maxResults || Infinity;
         const contextLines = options.contextLines || 0;
 
-        // 自适应批次大小和并发度
+        // 更大的批次大小，减少 Promise 开销
         const totalFiles = files.length;
-        const batchSize = totalFiles > 10000 ? 200 : totalFiles > 1000 ? 100 : 50;
-        const concurrency = Math.max(8, os.cpus().length * 2);
+        const batchSize = totalFiles > 50000 ? 500 : totalFiles > 5000 ? 200 : 100;
+        
+        // 适中的并发度，平衡 I/O 和 CPU
+        const concurrency = Math.min(8, Math.max(3, os.cpus().length));
 
         for (let i = 0; i < files.length && matches.length < maxResults; i += batchSize) {
             const batch = files.slice(i, Math.min(i + batchSize, files.length));
-
-            // Process batch concurrently
-            const batchPromises = [];
-            for (let j = 0; j < batch.length && matches.length < maxResults; j += Math.ceil(batch.length / concurrency)) {
-                const subBatch = batch.slice(j, Math.min(j + Math.ceil(batch.length / concurrency), batch.length));
-                batchPromises.push(
+            
+            // 简化的并发处理：直接分割批次
+            const subBatchSize = Math.ceil(batch.length / concurrency);
+            const promises: Promise<SearchMatch[]>[] = [];
+            
+            for (let j = 0; j < batch.length; j += subBatchSize) {
+                const subBatch = batch.slice(j, Math.min(j + subBatchSize, batch.length));
+                promises.push(
                     this.searchBatch(subBatch, basePath, searchRegex, contextLines, maxResults - matches.length)
                 );
             }
 
-            const batchResults = await Promise.all(batchPromises);
+            // 等待当前批次完成再继续
+            const batchResults = await Promise.all(promises);
             for (const result of batchResults) {
                 matches.push(...result);
                 if (matches.length >= maxResults) {
@@ -301,8 +397,8 @@ export class TextSearcher {
                 }
             }
 
-            // 进度报告
-            if (i % (batchSize * 10) === 0 && i > 0) {
+            // 减少进度报告频率
+            if (i % (batchSize * 20) === 0 && i > 0) {
                 const progress = ((i / files.length) * 100).toFixed(1);
                 console.log(`[TEXT-SEARCH] Progress: ${progress}% (${i}/${files.length} files, ${matches.length} matches)`);
             }
@@ -312,7 +408,7 @@ export class TextSearcher {
     }
 
     /**
-     * Search a batch of files
+     * 高效搜索文件批次 - 优化 I/O 和早期终止
      */
     private async searchBatch(
         files: string[],
@@ -329,10 +425,13 @@ export class TextSearcher {
             }
 
             try {
-                // 获取文件大小
-                const stat = await fs.stat(file);
-                if (stat.size > 10 * 1024 * 1024) {
-                    console.log(`[TEXT-SEARCH] Skipping large file: ${file} (${(stat.size / 1024 / 1024).toFixed(2)}MB)`);
+                // 并行获取文件状态和初步检查
+                const [stat] = await Promise.all([
+                    fs.stat(file)
+                ]);
+                
+                // 更严格的文件大小限制
+                if (stat.size > 5 * 1024 * 1024) { // 降低到 5MB
                     continue;
                 }
 
@@ -340,11 +439,24 @@ export class TextSearcher {
                     continue;
                 }
 
-                // 读取文件内容并检查二进制
-                const content = await fs.readFile(file, 'utf-8');
-                if (content.includes('\0')) {
+                // 快速二进制检查：只读取前 1KB 来判断
+                const header = await fs.readFile(file, { encoding: 'utf-8' });
+                const headerChunk = header.slice(0, 1024);
+                if (headerChunk.includes('\0')) {
                     continue;
                 }
+
+                // 对于大文件，先检查是否包含匹配内容再完全读取
+                if (stat.size > 1024 * 1024) { // 1MB 以上文件
+                    const shouldSearch = await this.quickFileScan(file, searchRegex);
+                    if (!shouldSearch) {
+                        continue;
+                    }
+                }
+
+                // 读取完整文件内容
+                const content = await fs.readFile(file, 'utf-8');
+                
                 // 使用正则表达式正确处理 Windows (CRLF) 和 Unix (LF) 换行符
                 const lines = content.split(/\r?\n/);
 
@@ -376,13 +488,58 @@ export class TextSearcher {
                     }
                 }
             } catch (error: any) {
-                // 跳过无法读取的文件
+                // 静默跳过无法读取的文件，减少日志噪音
                 if (!error.message.includes('ENOENT')) {
-                    console.warn(`[TEXT-SEARCH] Error reading file ${file}: ${error.message}`);
+                    // 只在调试模式下记录错误
+                    // console.warn(`[TEXT-SEARCH] Error reading file ${file}: ${error.message}`);
                 }
             }
         }
 
         return matches;
+    }
+
+    /**
+     * 快速扫描大文件是否包含匹配内容
+     */
+    private async quickFileScan(file: string, searchRegex: RegExp): Promise<boolean> {
+        try {
+            // 使用 fs.createReadStream 进行流式读取，避免内存问题
+            return new Promise((resolve) => {
+                const stream = fsSync.createReadStream(file, { 
+                    encoding: 'utf-8',
+                    start: 0,
+                    highWaterMark: 64 * 1024 // 64KB buffer
+                });
+                
+                let scannedSize = 0;
+                const maxScanSize = Math.min(1024 * 1024, fsSync.statSync(file).size * 0.1); // 最多 1MB 或文件大小的 10%
+                
+                stream.on('data', (chunk) => {
+                    // 确保 chunk 是字符串
+                    const chunkStr = typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
+                    
+                    if (searchRegex.test(chunkStr)) {
+                        stream.destroy(); // 停止读取
+                        resolve(true);
+                        return;
+                    }
+                    
+                    scannedSize += chunkStr.length;
+                    if (scannedSize >= maxScanSize) {
+                        stream.destroy(); // 停止读取
+                        resolve(false);
+                    }
+                    
+                    // 重置 regex 的 lastIndex
+                    searchRegex.lastIndex = 0;
+                });
+                
+                stream.on('end', () => resolve(false));
+                stream.on('error', () => resolve(false));
+            });
+        } catch {
+            return false;
+        }
     }
 }
