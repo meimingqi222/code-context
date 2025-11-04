@@ -7,21 +7,34 @@ import { initLogger, getLogger } from './logger.js';
 const logger = initLogger();
 
 // Redirect console outputs to logger to avoid interfering with MCP JSON protocol
-// Only MCP protocol messages should go to stdout
+// Only critical errors should go to stderr, debug info goes to files only
 const originalConsoleLog = console.log;
 const originalConsoleWarn = console.warn;
 const originalConsoleError = console.error;
 
 console.log = (...args: any[]) => {
-    logger.log(...args);
+    // 检查是否为关键信息（如启动信息、错误提示等）
+    const message = args.join(' ');
+    const isCritical = message.includes('[ERROR]') || 
+                      message.includes('Fatal error') ||
+                      message.includes('Error starting indexing') ||
+                      message.includes('Collection limit') ||
+                      message.includes('📁 Log directory:') ||
+                      message.includes('📝 Current log file:');
+    
+    if (isCritical) {
+        logger.error(...args); // 关键信息输出到stderr
+    } else {
+        logger.file(...args); // 其他信息只写入文件
+    }
 };
 
 console.warn = (...args: any[]) => {
-    logger.warn(...args);
+    logger.warn(...args); // 警告信息根据logger配置处理
 };
 
 console.error = (...args: any[]) => {
-    logger.error(...args);
+    logger.error(...args); // 错误信息输出到stderr
 };
 
 console.debug = (...args: any[]) => {

@@ -106,12 +106,12 @@ export class ToolHandlers {
             if (this.cloudSyncCache && 
                 (now - this.cloudSyncCache.timestamp < this.CLOUD_SYNC_CACHE_TTL)) {
                 const cacheAge = ((now - this.cloudSyncCache.timestamp) / 1000).toFixed(1);
-                console.log(`[SYNC-CLOUD] ⚡ Using cached cloud sync data (age: ${cacheAge}s, TTL: ${this.CLOUD_SYNC_CACHE_TTL / 1000}s)`);
-                console.log(`[SYNC-CLOUD] 💾 Cached ${this.cloudSyncCache.cloudCodebases.size} codebases`);
+                this.logger.file(`[SYNC-CLOUD] ⚡ Using cached cloud sync data (age: ${cacheAge}s, TTL: ${this.CLOUD_SYNC_CACHE_TTL / 1000}s)`);
+                this.logger.file(`[SYNC-CLOUD] 💾 Cached ${this.cloudSyncCache.cloudCodebases.size} codebases`);
                 return;
             }
             
-            console.log(`[SYNC-CLOUD] 🔄 Syncing indexed codebases from Zilliz Cloud...`);
+            this.logger.file(`[SYNC-CLOUD] 🔄 Syncing indexed codebases from Zilliz Cloud...`);
             const syncStartTime = Date.now();
 
             // Get all collections using the interface method
@@ -120,20 +120,20 @@ export class ToolHandlers {
             // Use the new listCollections method from the interface
             const collections = await vectorDb.listCollections();
 
-            console.log(`[SYNC-CLOUD] 📋 Found ${collections.length} collections in Zilliz Cloud`);
+            this.logger.file(`[SYNC-CLOUD] 📋 Found ${collections.length} collections in Zilliz Cloud`);
 
             if (collections.length === 0) {
-                console.log(`[SYNC-CLOUD] ✅ No collections found in cloud`);
+                this.logger.file(`[SYNC-CLOUD] ✅ No collections found in cloud`);
                 // If no collections in cloud, remove all local codebases
                 const localCodebases = this.snapshotManager.getIndexedCodebases();
                 if (localCodebases.length > 0) {
-                    console.log(`[SYNC-CLOUD] 🧹 Removing ${localCodebases.length} local codebases as cloud has no collections`);
+                    this.logger.file(`[SYNC-CLOUD] 🧹 Removing ${localCodebases.length} local codebases as cloud has no collections`);
                     for (const codebasePath of localCodebases) {
                         this.snapshotManager.removeIndexedCodebase(codebasePath);
-                        console.log(`[SYNC-CLOUD] ➖ Removed local codebase: ${codebasePath}`);
+                        this.logger.file(`[SYNC-CLOUD] ➖ Removed local codebase: ${codebasePath}`);
                     }
                     this.snapshotManager.saveCodebaseSnapshot();
-                    console.log(`[SYNC-CLOUD] 💾 Updated snapshot to match empty cloud state`);
+                    this.logger.file(`[SYNC-CLOUD] 💾 Updated snapshot to match empty cloud state`);
                 }
                 return;
             }
@@ -146,11 +146,11 @@ export class ToolHandlers {
                     const collectionStr = String(collectionName);
                     // Skip collections that don't match the code_chunks pattern (support both legacy and new collections)
                     if (!collectionStr.startsWith('code_chunks_') && !collectionStr.startsWith('hybrid_code_chunks_')) {
-                        console.log(`[SYNC-CLOUD] ⏭️  Skipping non-code collection: ${collectionStr}`);
+                        this.logger.file(`[SYNC-CLOUD] ⏭️  Skipping non-code collection: ${collectionStr}`);
                         continue;
                     }
 
-                    console.log(`[SYNC-CLOUD] 🔍 Checking collection: ${collectionStr}`);
+                    this.logger.file(`[SYNC-CLOUD] 🔍 Checking collection: ${collectionStr}`);
 
                     // Query the first document to get metadata
                     const results = await vectorDb.query(
@@ -170,31 +170,31 @@ export class ToolHandlers {
                                 const codebasePath = metadata.codebasePath;
 
                                 if (codebasePath && typeof codebasePath === 'string') {
-                                    console.log(`[SYNC-CLOUD] 📍 Found codebase path: ${codebasePath} in collection: ${collectionStr}`);
+                                    this.logger.file(`[SYNC-CLOUD] 📍 Found codebase path: ${codebasePath} in collection: ${collectionStr}`);
                                     cloudCodebases.add(codebasePath);
                                 } else {
-                                    console.warn(`[SYNC-CLOUD] ⚠️  No codebasePath found in metadata for collection: ${collectionStr}`);
+                                    this.logger.file(`[SYNC-CLOUD] ⚠️  No codebasePath found in metadata for collection: ${collectionStr}`);
                                 }
                             } catch (parseError) {
-                                console.warn(`[SYNC-CLOUD] ⚠️  Failed to parse metadata JSON for collection ${collectionStr}:`, parseError);
+                                this.logger.file(`[SYNC-CLOUD] ⚠️  Failed to parse metadata JSON for collection ${collectionStr}: ${parseError}`);
                             }
                         } else {
-                            console.warn(`[SYNC-CLOUD] ⚠️  No metadata found in collection: ${collectionStr}`);
+                            this.logger.file(`[SYNC-CLOUD] ⚠️  No metadata found in collection: ${collectionStr}`);
                         }
                     } else {
-                        console.log(`[SYNC-CLOUD] ℹ️  Collection ${collectionStr} is empty`);
+                        this.logger.file(`[SYNC-CLOUD] ℹ️  Collection ${collectionStr} is empty`);
                     }
                 } catch (collectionError: any) {
-                    console.warn(`[SYNC-CLOUD] ⚠️  Error checking collection ${String(collectionName)}:`, collectionError.message || collectionError);
+                    this.logger.file(`[SYNC-CLOUD] ⚠️  Error checking collection ${String(collectionName)}: ${collectionError.message || collectionError}`);
                     // Continue with next collection
                 }
             }
 
-            console.log(`[SYNC-CLOUD] 📊 Found ${cloudCodebases.size} valid codebases in cloud`);
+            this.logger.file(`[SYNC-CLOUD] 📊 Found ${cloudCodebases.size} valid codebases in cloud`);
 
             // Get current local codebases
             const localCodebases = new Set(this.snapshotManager.getIndexedCodebases());
-            console.log(`[SYNC-CLOUD] 📊 Found ${localCodebases.size} local codebases in snapshot`);
+            this.logger.file(`[SYNC-CLOUD] 📊 Found ${localCodebases.size} local codebases in snapshot`);
 
             let hasChanges = false;
 
@@ -203,18 +203,18 @@ export class ToolHandlers {
                 if (!cloudCodebases.has(localCodebase)) {
                     this.snapshotManager.removeIndexedCodebase(localCodebase);
                     hasChanges = true;
-                    console.log(`[SYNC-CLOUD] ➖ Removed local codebase (not in cloud): ${localCodebase}`);
+                    this.logger.file(`[SYNC-CLOUD] ➖ Removed local codebase (not in cloud): ${localCodebase}`);
                 }
             }
 
             // Note: We don't add cloud codebases that are missing locally (as per user requirement)
-            console.log(`[SYNC-CLOUD] ℹ️  Skipping addition of cloud codebases not present locally (per sync policy)`);
+            this.logger.file(`[SYNC-CLOUD] ℹ️  Skipping addition of cloud codebases not present locally (per sync policy)`);
 
             if (hasChanges) {
                 this.snapshotManager.saveCodebaseSnapshot();
-                console.log(`[SYNC-CLOUD] 💾 Updated snapshot to match cloud state`);
+                this.logger.file(`[SYNC-CLOUD] 💾 Updated snapshot to match cloud state`);
             } else {
-                console.log(`[SYNC-CLOUD] ✅ Local snapshot already matches cloud state`);
+                this.logger.file(`[SYNC-CLOUD] ✅ Local snapshot already matches cloud state`);
             }
             
             // ✅ 性能优化: 更新缓存
@@ -224,8 +224,8 @@ export class ToolHandlers {
             };
             
             const syncDuration = ((Date.now() - syncStartTime) / 1000).toFixed(2);
-            console.log(`[SYNC-CLOUD] ✅ Cloud sync completed successfully in ${syncDuration}s`);
-            console.log(`[SYNC-CLOUD] 💾 Cached result for ${this.CLOUD_SYNC_CACHE_TTL / 1000}s`);
+            this.logger.file(`[SYNC-CLOUD] ✅ Cloud sync completed successfully in ${syncDuration}s`);
+            this.logger.file(`[SYNC-CLOUD] 💾 Cached result for ${this.CLOUD_SYNC_CACHE_TTL / 1000}s`);
         } catch (error: any) {
             console.error(`[SYNC-CLOUD] ❌ Error syncing codebases from cloud:`, error.message || error);
             // Don't throw - this is not critical for the main functionality
@@ -398,7 +398,7 @@ export class ToolHandlers {
             const currentStatus = this.snapshotManager.getCodebaseStatus(absolutePath);
             if (currentStatus === 'indexfailed') {
                 const failedInfo = this.snapshotManager.getCodebaseInfo(absolutePath) as any;
-                console.log(`[BACKGROUND-INDEX] Retrying indexing for previously failed codebase. Previous error: ${failedInfo?.errorMessage || 'Unknown error'}`);
+                this.logger.file(`[BACKGROUND-INDEX] Retrying indexing for previously failed codebase. Previous error: ${failedInfo?.errorMessage || 'Unknown error'}`);
             }
 
             // Set to indexing status and save snapshot immediately
@@ -469,17 +469,17 @@ Ready to explore your codebase!`
         let lastSaveTime = 0; // Track last save timestamp
 
         try {
-            console.log(`[BACKGROUND-INDEX] Starting background indexing for: ${absolutePath}`);
+            this.logger.file(`[BACKGROUND-INDEX] Starting background indexing for: ${absolutePath}`);
 
             // Note: If force reindex, collection was already cleared during validation phase
             if (forceReindex) {
-                console.log(`[BACKGROUND-INDEX] ℹ️  Force reindex mode - collection was already cleared during validation`);
+                this.logger.file(`[BACKGROUND-INDEX] ℹ️  Force reindex mode - collection was already cleared during validation`);
             }
 
             // Use the existing Context instance for indexing.
             let contextForThisTask = this.context;
             if (splitterType !== 'ast') {
-                console.warn(`[BACKGROUND-INDEX] Non-AST splitter '${splitterType}' requested; falling back to AST splitter`);
+                this.logger.file(`[BACKGROUND-INDEX] Non-AST splitter '${splitterType}' requested; falling back to AST splitter`);
             }
 
             // Load ignore patterns from files first (including .ignore, .gitignore, etc.)
@@ -488,7 +488,7 @@ Ready to explore your codebase!`
             // Initialize file synchronizer with proper ignore patterns (including project-specific patterns)
             const { FileSynchronizer } = await import("@zilliz/claude-context-core");
             const ignorePatterns = this.context.getIgnorePatterns() || [];
-            console.log(`[BACKGROUND-INDEX] Using ignore patterns: ${ignorePatterns.join(', ')}`);
+            this.logger.file(`[BACKGROUND-INDEX] Using ignore patterns: ${ignorePatterns.join(', ')}`);
             const synchronizer = new FileSynchronizer(absolutePath, ignorePatterns);
             await synchronizer.initialize();
 
@@ -500,14 +500,14 @@ Ready to explore your codebase!`
                 contextForThisTask.setSynchronizer(collectionName, synchronizer);
             }
 
-            console.log(`[BACKGROUND-INDEX] Starting indexing with ${splitterType} splitter for: ${absolutePath}`);
+            this.logger.file(`[BACKGROUND-INDEX] Starting indexing with ${splitterType} splitter for: ${absolutePath}`);
 
             // Log embedding provider information before indexing
             const embeddingProvider = this.context.getEmbedding();
-            console.log(`[BACKGROUND-INDEX] 🧠 Using embedding provider: ${embeddingProvider.getProvider()} with dimension: ${embeddingProvider.getDimension()}`);
+            this.logger.file(`[BACKGROUND-INDEX] 🧠 Using embedding provider: ${embeddingProvider.getProvider()} with dimension: ${embeddingProvider.getDimension()}`);
 
             // Start indexing with the appropriate context and progress tracking
-            console.log(`[BACKGROUND-INDEX] 🚀 Beginning codebase indexing process...`);
+            this.logger.file(`[BACKGROUND-INDEX] 🚀 Beginning codebase indexing process...`);
             const stats = await contextForThisTask.indexCodebase(absolutePath, (progress: any) => {
                 // Update progress in snapshot manager using new method
                 this.snapshotManager.setCodebaseIndexing(absolutePath, progress.percentage);
@@ -517,12 +517,12 @@ Ready to explore your codebase!`
                 if (currentTime - lastSaveTime >= 2000) { // 2 seconds = 2000ms
                     this.snapshotManager.saveCodebaseSnapshot();
                     lastSaveTime = currentTime;
-                    console.log(`[BACKGROUND-INDEX] 💾 Saved progress snapshot at ${progress.percentage.toFixed(1)}%`);
+                    this.logger.file(`[BACKGROUND-INDEX] 💾 Saved progress snapshot at ${progress.percentage.toFixed(1)}%`);
                 }
 
                 this.logger.file(`[BACKGROUND-INDEX] Progress: ${progress.phase} - ${progress.percentage}% (${progress.current}/${progress.total})`);
             });
-            console.log(`[BACKGROUND-INDEX] ✅ Indexing completed successfully! Files: ${stats.indexedFiles}, Chunks: ${stats.totalChunks}`);
+            this.logger.file(`[BACKGROUND-INDEX] ✅ Indexing completed successfully! Files: ${stats.indexedFiles}, Chunks: ${stats.totalChunks}`);
 
             // Set codebase to indexed status with complete statistics
             this.snapshotManager.setCodebaseIndexed(absolutePath, stats);
@@ -536,10 +536,10 @@ Ready to explore your codebase!`
                 message += `\n⚠️  Warning: Indexing stopped because the chunk limit (450,000) was reached. The index may be incomplete.`;
             }
 
-            console.log(`[BACKGROUND-INDEX] ${message}`);
+            this.logger.file(`[BACKGROUND-INDEX] ${message}`);
 
         } catch (error: any) {
-            console.error(`[BACKGROUND-INDEX] Error during indexing for ${absolutePath}:`, error);
+            this.logger.file(`[BACKGROUND-INDEX] Error during indexing for ${absolutePath}: ${error}`);
 
             // Get the last attempted progress
             const lastProgress = this.snapshotManager.getIndexingProgress(absolutePath);
@@ -550,7 +550,7 @@ Ready to explore your codebase!`
             this.snapshotManager.saveCodebaseSnapshot();
 
             // Log error but don't crash MCP service - indexing errors are handled gracefully
-            console.error(`[BACKGROUND-INDEX] Indexing failed for ${absolutePath}: ${errorMessage}`);
+            this.logger.file(`[BACKGROUND-INDEX] Indexing failed for ${absolutePath}: ${errorMessage}`);
         }
     }
 
@@ -561,13 +561,13 @@ Ready to explore your codebase!`
         try {
             // 🕒 性能追踪: 总体搜索开始
             const totalSearchStartTime = Date.now();
-            console.log(`[SEARCH-PERF] 🚀 Starting search for query: "${query}"`);
+            this.logger.file(`[SEARCH-PERF] 🚀 Starting search for query: "${query}"`);
             
             // Sync indexed codebases from cloud first
             const syncStartTime = Date.now();
             await this.syncIndexedCodebasesFromCloud();
             const syncDuration = ((Date.now() - syncStartTime) / 1000).toFixed(2);
-            console.log(`[SEARCH-PERF] ✅ Cloud sync completed in ${syncDuration}s`);
+            this.logger.file(`[SEARCH-PERF] ✅ Cloud sync completed in ${syncDuration}s`);
 
             // Smart path resolution
             const { resolvedPath: absolutePath, pathInfo } = this.smartPathResolution(codebasePath, 'search');
@@ -683,7 +683,7 @@ Ready to index this codebase?`
                 filterExpr
             );
             const searchDuration = ((Date.now() - searchStartTime) / 1000).toFixed(2);
-            console.log(`[SEARCH-PERF] ✅ Vector search completed in ${searchDuration}s`);
+            this.logger.file(`[SEARCH-PERF] ✅ Vector search completed in ${searchDuration}s`);
 
             this.logger.file(`[SEARCH] ✅ Search completed! Found ${searchResults.length} results using ${embeddingProvider.getProvider()} embeddings`);
 

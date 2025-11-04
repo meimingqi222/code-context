@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import ignore from 'ignore';
 import micromatch from 'micromatch';
+import { getLogger } from './logger.js';
 
 export interface TextSearchOptions {
     pattern: string;
@@ -88,7 +89,8 @@ export class TextSearcher {
     async search(searchPath: string, options: TextSearchOptions): Promise<SearchResult> {
         const startTime = Date.now();
         const timeoutMs = options.timeout || 10000; // 默认10秒超时
-        console.log(`[TEXT-SEARCH] 🔍 Starting search performance analysis (timeout: ${timeoutMs}ms)`);
+        // 详细性能信息只写入文件日志
+        getLogger().file(`[TEXT-SEARCH] 🔍 Starting search performance analysis (timeout: ${timeoutMs}ms)`);
 
         // 创建超时Promise
         const timeoutPromise = new Promise<SearchResult>((_, reject) => {
@@ -106,7 +108,7 @@ export class TextSearcher {
         } catch (error: any) {
             if (error.message.includes('timeout')) {
                 const duration = Date.now() - startTime;
-                console.log(`[TEXT-SEARCH] ⏰ SEARCH TIMEOUT: ${duration}ms`);
+                getLogger().file(`[TEXT-SEARCH] ⏰ SEARCH TIMEOUT: ${duration}ms`);
                 return {
                     matches: [],
                     totalMatches: 0,
@@ -122,7 +124,7 @@ export class TextSearcher {
      * 实际执行搜索的方法
      */
     private async doSearch(searchPath: string, options: TextSearchOptions, startTime: number): Promise<SearchResult> {
-        console.log(`[TEXT-SEARCH] 🔍 Starting actual search implementation`);
+        getLogger().file(`[TEXT-SEARCH] 🔍 Starting actual search implementation`);
 
         // Validate path
         if (!fsSync.existsSync(searchPath)) {
@@ -140,17 +142,17 @@ export class TextSearcher {
             await this.loadIgnorePatterns(searchPath);
         }
         const ignoreDuration = Date.now() - ignoreStartTime;
-        console.log(`[TEXT-SEARCH] ⏱️  Ignore patterns loaded in ${ignoreDuration}ms`);
+        getLogger().file(`[TEXT-SEARCH] ⏱️  Ignore patterns loaded in ${ignoreDuration}ms`);
 
         // 异步并发收集文件
         const collectStartTime = Date.now();
         const files = await this.collectFilesConcurrent(searchPath, options);
         const collectDuration = Date.now() - collectStartTime;
-        console.log(`[TEXT-SEARCH] ⏱️  File collection completed in ${collectDuration}ms - Found ${files.length} files`);
+        getLogger().file(`[TEXT-SEARCH] ⏱️  File collection completed in ${collectDuration}ms - Found ${files.length} files`);
         
         // 如果文件收集就花了很长时间，这就是主要瓶颈
         if (collectDuration > 5000) {
-            console.log(`[TEXT-SEARCH] 🚨 BOTTLENECK DETECTED: File collection took ${collectDuration}ms`);
+            getLogger().file(`[TEXT-SEARCH] 🚨 BOTTLENECK DETECTED: File collection took ${collectDuration}ms`);
         }
 
         if (files.length === 0) {
@@ -169,15 +171,15 @@ export class TextSearcher {
         const searchStartTime = Date.now();
         const matches = await this.searchFiles(files, searchPath, searchRegex, options);
         const searchDuration = Date.now() - searchStartTime;
-        console.log(`[TEXT-SEARCH] ⏱️  File search completed in ${searchDuration}ms - Found ${matches.length} matches`);
+        getLogger().file(`[TEXT-SEARCH] ⏱️  File search completed in ${searchDuration}ms - Found ${matches.length} matches`);
         
         // 如果文件搜索花了很长时间，这是另一个瓶颈
         if (searchDuration > 5000) {
-            console.log(`[TEXT-SEARCH] 🚨 BOTTLENECK DETECTED: File search took ${searchDuration}ms`);
+            getLogger().file(`[TEXT-SEARCH] 🚨 BOTTLENECK DETECTED: File search took ${searchDuration}ms`);
         }
 
         const totalDuration = Date.now() - startTime;
-        console.log(`[TEXT-SEARCH] ✅ Total search completed in ${totalDuration}ms (Ignore: ${ignoreDuration}ms, Collect: ${collectDuration}ms, Search: ${searchDuration}ms)`);
+        getLogger().file(`[TEXT-SEARCH] ✅ Total search completed in ${totalDuration}ms (Ignore: ${ignoreDuration}ms, Collect: ${collectDuration}ms, Search: ${searchDuration}ms)`);
 
         return {
             matches,
@@ -213,7 +215,7 @@ export class TextSearcher {
                 
                 if (patterns.length > 0) {
                     this.ignoreFilter!.add(patterns);
-                    console.log(`[TEXT-SEARCH] Loaded ${patterns.length} patterns from ${name}`);
+                    getLogger().file(`[TEXT-SEARCH] Loaded ${patterns.length} patterns from ${name}`);
                 }
             } catch {
                 // 文件不存在，忽略
@@ -229,7 +231,7 @@ export class TextSearcher {
         options: TextSearchOptions,
         basePath: string = dirPath
     ): Promise<string[]> {
-        console.log(`[TEXT-SEARCH] 📁 Starting simplified file collection`);
+        getLogger().file(`[TEXT-SEARCH] 📁 Starting simplified file collection`);
         const files: string[] = [];
         
         // 使用简单的递归遍历，避免复杂的并发逻辑
@@ -272,7 +274,7 @@ export class TextSearcher {
         };
         
         await collectFiles(dirPath);
-        console.log(`[TEXT-SEARCH] 📁 Simplified collection completed: ${files.length} files`);
+        getLogger().file(`[TEXT-SEARCH] 📁 Simplified collection completed: ${files.length} files`);
         return files;
     }
 
@@ -294,7 +296,7 @@ export class TextSearcher {
             
             // 如果单个目录读取就很慢，记录下来
             if (readDuration > 100) {
-                console.log(`[TEXT-SEARCH] 🐌 Slow directory read: ${dirPath} took ${readDuration}ms for ${entries.length} entries`);
+                getLogger().file(`[TEXT-SEARCH] 🐌 Slow directory read: ${dirPath} took ${readDuration}ms for ${entries.length} entries`);
             }
 
             for (const entry of entries) {
@@ -310,7 +312,7 @@ export class TextSearcher {
                 // 不需要手动转换路径分隔符，这可能导致模式匹配失效
                 
                 if (this.ignoreFilter && this.ignoreFilter.ignores(relativePath)) {
-                    console.log(`[TEXT-SEARCH] Ignoring file (matched pattern): ${relativePath}`);
+                    getLogger().file(`[TEXT-SEARCH] Ignoring file (matched pattern): ${relativePath}`);
                     continue;
                 }
 
@@ -401,7 +403,7 @@ export class TextSearcher {
             if (i > 0 && i % (batchSize * 50) === 0) {
                 const progress = ((i / files.length) * 100).toFixed(1);
                 if (parseFloat(progress) % 10 === 0) { // 只在整10%时报告
-                    console.log(`[TEXT-SEARCH] Progress: ${progress}% (${i}/${files.length} files, ${matches.length} matches)`);
+                    getLogger().file(`[TEXT-SEARCH] Progress: ${progress}% (${i}/${files.length} files, ${matches.length} matches)`);
                 }
             }
         }

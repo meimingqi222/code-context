@@ -208,8 +208,10 @@ export class Logger {
         const timestamp = new Date().toISOString();
         const logMessage = `[${timestamp}] ${prefix} ${message}\n`;
 
-        // Always write to stderr for MCP protocol
-        process.stderr.write(logMessage);
+        // MCP协议：只输出错误级别到stderr，避免污染客户端日志
+        if (level === 'error') {
+            process.stderr.write(logMessage);
+        }
 
         // Write to file if enabled
         if (this.enableFileLogging && this.logStream) {
