@@ -1,12 +1,14 @@
 import * as fs from "fs";
 import { Context, FileSynchronizer } from "@zilliz/claude-context-core";
 import { SnapshotManager } from "./snapshot.js";
+import { getLogger } from "./logger.js";
 
 export class SyncManager {
     private context: Context;
     private snapshotManager: SnapshotManager;
     private isSyncing: boolean = false;
     private syncIntervalId: NodeJS.Timeout | null = null;
+    private logger = getLogger();
 
     constructor(context: Context, snapshotManager: SnapshotManager) {
         this.context = context;
@@ -15,34 +17,24 @@ export class SyncManager {
 
     public async handleSyncIndex(): Promise<void> {
         const syncStartTime = Date.now();
-        if (process.env.NODE_ENV === 'development') {
-            console.log(`[SYNC-DEBUG] handleSyncIndex() called at ${new Date().toISOString()}`);
-        }
+        this.logger.file(`[SYNC] Starting index sync at ${new Date().toISOString()}`);
 
         const indexedCodebases = this.snapshotManager.getIndexedCodebases();
 
         if (indexedCodebases.length === 0) {
-            if (process.env.NODE_ENV === 'development') {
-                console.log('[SYNC-DEBUG] No codebases indexed. Skipping sync.');
-            }
+            this.logger.file('[SYNC] No codebases indexed. Skipping sync.');
             return;
         }
 
-        if (process.env.NODE_ENV === 'development') {
-            console.log(`[SYNC-DEBUG] Found ${indexedCodebases.length} indexed codebases:`, indexedCodebases);
-        }
+        this.logger.file(`[SYNC] Found ${indexedCodebases.length} indexed codebases for sync`);
 
         if (this.isSyncing) {
-            if (process.env.NODE_ENV === 'development') {
-                console.log('[SYNC-DEBUG] Index sync already in progress. Skipping.');
-            }
+            this.logger.file('[SYNC] Index sync already in progress. Skipping.');
             return;
         }
 
         this.isSyncing = true;
-        if (process.env.NODE_ENV === 'development') {
-            console.log(`[SYNC-DEBUG] Starting index sync for all ${indexedCodebases.length} codebases...`);
-        }
+        this.logger.file(`[SYNC] Starting index sync for ${indexedCodebases.length} codebases`);
 
         try {
             let totalStats = { added: 0, removed: 0, modified: 0 };

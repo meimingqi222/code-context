@@ -6,6 +6,7 @@ import { SnapshotManager } from "./snapshot.js";
 import { SyncManager } from "./sync.js";
 import { ensureAbsolutePath, truncateContent, trackCodebasePath, isPathIndexedOrNested, findIndexedParentDirectory } from "./utils.js";
 import { TextSearcher, TextSearchOptions } from "./text-search.js";
+import { getLogger } from "./logger.js";
 
 export class ToolHandlers {
     private context: Context;
@@ -13,6 +14,7 @@ export class ToolHandlers {
     private syncManager: SyncManager | null = null;
     private indexingStats: { indexedFiles: number; totalChunks: number } | null = null;
     private currentWorkspace: string;
+    private logger = getLogger();
     
     // 云端同步缓存机制 - 优化性能
     private cloudSyncCache: {
@@ -518,7 +520,7 @@ Ready to explore your codebase!`
                     console.log(`[BACKGROUND-INDEX] 💾 Saved progress snapshot at ${progress.percentage.toFixed(1)}%`);
                 }
 
-                console.log(`[BACKGROUND-INDEX] Progress: ${progress.phase} - ${progress.percentage}% (${progress.current}/${progress.total})`);
+                this.logger.file(`[BACKGROUND-INDEX] Progress: ${progress.phase} - ${progress.percentage}% (${progress.current}/${progress.total})`);
             });
             console.log(`[BACKGROUND-INDEX] ✅ Indexing completed successfully! Files: ${stats.indexedFiles}, Chunks: ${stats.totalChunks}`);
 
@@ -649,15 +651,9 @@ Ready to index this codebase?`
                 }
             }
 
-            console.log(`[SEARCH] Searching in codebase: ${absolutePath}`);
-            console.log(`[SEARCH] Actual search target (indexed directory): ${searchTargetPath}`);
-            console.log(`[SEARCH] Query: "${query}"`);
-            console.log(`[SEARCH] Indexing status: ${isIndexing ? 'In Progress' : 'Completed'}`);
-
-            // Log embedding provider information before search
             const embeddingProvider = this.context.getEmbedding();
-            console.log(`[SEARCH] 🧠 Using embedding provider: ${embeddingProvider.getProvider()} for search`);
-            console.log(`[SEARCH] 🔍 Generating embeddings for query using ${embeddingProvider.getProvider()}...`);
+            this.logger.file(`[SEARCH] Searching in codebase: ${absolutePath}, Query: "${query}"`);
+            this.logger.file(`[SEARCH] Using embedding provider: ${embeddingProvider.getProvider()}`);
 
             // Build filter expression from extensionFilter list
             let filterExpr: string | undefined = undefined;
@@ -689,7 +685,7 @@ Ready to index this codebase?`
             const searchDuration = ((Date.now() - searchStartTime) / 1000).toFixed(2);
             console.log(`[SEARCH-PERF] ✅ Vector search completed in ${searchDuration}s`);
 
-            console.log(`[SEARCH] ✅ Search completed! Found ${searchResults.length} results using ${embeddingProvider.getProvider()} embeddings`);
+            this.logger.file(`[SEARCH] ✅ Search completed! Found ${searchResults.length} results using ${embeddingProvider.getProvider()} embeddings`);
 
             if (searchResults.length === 0) {
                 let noResultsMessage = `No results found for query: "${query}" in codebase '${absolutePath}'`;
@@ -762,8 +758,8 @@ Ready to index this codebase?`
             
             // 🕒 性能追踪: 总体搜索完成
             const totalDuration = ((Date.now() - totalSearchStartTime) / 1000).toFixed(2);
-            console.log(`[SEARCH-PERF] 🏁 Total search completed in ${totalDuration}s`);
-            console.log(`[SEARCH-PERF] 📊 Breakdown: Sync=${syncDuration}s, Search=${searchDuration}s, Other=${(parseFloat(totalDuration) - parseFloat(syncDuration) - parseFloat(searchDuration)).toFixed(2)}s`);
+            this.logger.file(`[SEARCH-PERF] 🏁 Total search completed in ${totalDuration}s`);
+            this.logger.file(`[SEARCH-PERF] 📊 Breakdown: Sync=${syncDuration}s, Search=${searchDuration}s, Other=${(parseFloat(totalDuration) - parseFloat(syncDuration) - parseFloat(searchDuration)).toFixed(2)}s`);
 
             return {
                 content: [{
@@ -1126,13 +1122,7 @@ Ready to index this codebase?`
                 };
             }
 
-            console.log(`[TEXT-SEARCH] Starting text search in: ${absolutePath}`);
-            console.log(`[TEXT-SEARCH] Pattern: "${pattern}"`);
-            console.log(`[TEXT-SEARCH] Case sensitive: ${caseSensitive}`);
-            console.log(`[TEXT-SEARCH] Is regex: ${isRegex}`);
-            console.log(`[TEXT-SEARCH] File pattern: ${filePattern || 'all files'}`);
-            console.log(`[TEXT-SEARCH] Max results: ${maxResults}`);
-            console.log(`[TEXT-SEARCH] Respect .gitignore: ${respectGitignore}`);
+            this.logger.file(`[TEXT-SEARCH] Starting text search in: ${absolutePath}, Pattern: "${pattern}", Max results: ${maxResults}`);
 
             const searcher = new TextSearcher();
             const options: TextSearchOptions = {
@@ -1148,8 +1138,7 @@ Ready to index this codebase?`
 
             const result = await searcher.search(absolutePath, options);
 
-            console.log(`[TEXT-SEARCH] ✅ Search completed in ${result.duration}ms`);
-            console.log(`[TEXT-SEARCH] Found ${result.totalMatches} matches in ${result.filesSearched} files`);
+            this.logger.file(`[TEXT-SEARCH] ✅ Search completed in ${result.duration}ms, Found ${result.totalMatches} matches in ${result.filesSearched} files`);
 
             if (result.totalMatches === 0) {
                 return {

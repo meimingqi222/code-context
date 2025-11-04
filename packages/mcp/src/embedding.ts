@@ -1,9 +1,10 @@
 import { OpenAIEmbedding, VoyageAIEmbedding, GeminiEmbedding, OllamaEmbedding } from "@zilliz/claude-context-core";
 import { ContextMcpConfig } from "./config.js";
+import { getLogger } from "./logger.js";
 
 // Helper function to create embedding instance based on provider
 export function createEmbeddingInstance(config: ContextMcpConfig): OpenAIEmbedding | VoyageAIEmbedding | GeminiEmbedding | OllamaEmbedding {
-    console.log(`[EMBEDDING] Creating ${config.embeddingProvider} embedding instance...`);
+    // Embedding instance creation logs moved to file logging in index.ts
 
     switch (config.embeddingProvider) {
         case 'OpenAI':

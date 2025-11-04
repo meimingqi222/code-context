@@ -210,6 +210,13 @@ Environment Variables:
   MILVUS_ADDRESS          Milvus address (optional, can be auto-resolved from token)
   MILVUS_TOKEN            Milvus token (optional, used for authentication and address resolution)
 
+  Logging Configuration:
+  LOG_LEVEL               Log level: debug, info, warn, error (default: error)
+  LOG_DIR                 Log directory path (default: ~/.context/logs)
+  MAX_LOG_FILES           Maximum log files to keep (default: 7)
+  MAX_LOG_SIZE_MB         Maximum log file size in MB (default: 10)
+  ENABLE_FILE_LOGGING     Enable file logging: true, false (default: true)
+
 Examples:
   # Start MCP server with OpenAI (default) and explicit Milvus address
   OPENAI_API_KEY=sk-xxx MILVUS_ADDRESS=localhost:19530 npx @zilliz/claude-context-mcp@latest
@@ -228,5 +235,15 @@ Examples:
   
   # Start MCP server with Ollama and specific model (using EMBEDDING_MODEL)
   EMBEDDING_PROVIDER=Ollama EMBEDDING_MODEL=nomic-embed-text MILVUS_TOKEN=your-token npx @zilliz/claude-context-mcp@latest
+
+  # Logging Configuration Examples:
+  # Minimal logging (recommended for production to reduce disk usage)
+  LOG_LEVEL=error ENABLE_FILE_LOGGING=true npx @zilliz/claude-context-mcp@latest
+
+  # Debug logging (for troubleshooting)
+  LOG_LEVEL=debug LOG_DIR=/tmp/debug-logs npx @zilliz/claude-context-mcp@latest
+
+  # Disable file logging, console only
+  LOG_LEVEL=info ENABLE_FILE_LOGGING=false npx @zilliz/claude-context-mcp@latest
         `);
 } 

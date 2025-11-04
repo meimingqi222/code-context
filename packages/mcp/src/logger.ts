@@ -42,7 +42,7 @@ export class Logger {
         this.maxLogFiles = config.maxLogFiles || 7; // Keep last 7 log files
         this.maxLogSizeMB = config.maxLogSizeMB || 10; // 10MB per log file
         this.enableFileLogging = config.enableFileLogging !== false; // Enabled by default
-        this.logLevel = config.logLevel || 'warn'; // Default to warn level (includes warn + error)
+        this.logLevel = config.logLevel || 'error'; // Default to error level only to reduce log volume
         
         // Initialize log directory and file
         this.currentLogFile = this.getLogFileName();
@@ -68,30 +68,32 @@ export class Logger {
     }
 
     /**
-     * Generate log file name with timestamp
+     * Generate log file name with date and process ID
+     * Creates one log file per day per process to avoid file spam
      */
     private getLogFileName(): string {
-        const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
-        return path.join(this.logDir, `mcp-${timestamp}.log`);
+        const date = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+        const pid = process.pid;
+        return path.join(this.logDir, `mcp-${date}-pid-${pid}.log`);
     }
 
     /**
-     * Open log stream for writing
+     * Open log stream for writing (legacy method, now using appendFileSync)
+     * Kept for compatibility with other logging methods
      */
     private openLogStream(): void {
         try {
-            // Check if current log file exists and its size
-            if (fs.existsSync(this.currentLogFile)) {
-                const stats = fs.statSync(this.currentLogFile);
-                this.currentLogSize = stats.size;
-                
-                // If file is too large, rotate immediately
-                if (this.currentLogSize >= this.maxLogSizeMB * 1024 * 1024) {
-                    this.rotateLog();
-                    return;
-                }
+            // Update current log file size
+            this.updateCurrentLogSize();
+            
+            // If file is too large, rotate immediately
+            if (this.currentLogSize >= this.maxLogSizeMB * 1024 * 1024) {
+                this.rotateLog();
+                return;
             }
 
+            // Note: This stream is no longer used for file() method
+            // Kept for potential future use with console.log() methods
             this.logStream = fs.createWriteStream(this.currentLogFile, { flags: 'a' });
             this.logStream.on('error', (error) => {
                 process.stderr.write(`[LOGGER] Log stream error: ${error}\n`);
@@ -103,6 +105,7 @@ export class Logger {
 
     /**
      * Rotate log file when size limit is reached
+     * For rotation, we add a timestamp to create unique files
      */
     private rotateLog(): void {
         try {
@@ -112,12 +115,13 @@ export class Logger {
                 this.logStream = null;
             }
 
-            // Create new log file
-            this.currentLogFile = this.getLogFileName();
+            // Create new log file with timestamp for rotation
+            const date = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+            const time = new Date().toISOString().split('T')[1].split('.')[0].replace(/:/g, '-'); // HH-MM-SS format
+            const pid = process.pid;
+            this.currentLogFile = path.join(this.logDir, `mcp-${date}-pid-${pid}-rotated-${time}.log`);
             this.currentLogSize = 0;
-            this.openLogStream();
 
-            // Clean old logs after rotation
             this.cleanOldLogs();
         } catch (error) {
             process.stderr.write(`[LOGGER] Failed to rotate log: ${error}\n`);
@@ -126,6 +130,7 @@ export class Logger {
 
     /**
      * Clean old log files, keep only maxLogFiles newest files
+     * Supports new file naming pattern with process IDs
      */
     private cleanOldLogs(): void {
         try {
@@ -134,23 +139,31 @@ export class Logger {
             }
 
             const files = fs.readdirSync(this.logDir)
-                .filter(file => file.startsWith('mcp-') && file.endsWith('.log'))
-                .map(file => ({
-                    name: file,
-                    path: path.join(this.logDir, file),
-                    time: fs.statSync(path.join(this.logDir, file)).mtime.getTime()
-                }))
+                .filter(file => file.startsWith('mcp-') && (file.endsWith('.log') || file.includes('.log')))
+                .map(file => {
+                    const filePath = path.join(this.logDir, file);
+                    return {
+                        name: file,
+                        path: filePath,
+                        time: fs.statSync(filePath).mtime.getTime()
+                    };
+                })
                 .sort((a, b) => b.time - a.time); // Sort by time, newest first
 
             // Remove old files
             const filesToRemove = files.slice(this.maxLogFiles);
+            let cleanedCount = 0;
             for (const file of filesToRemove) {
                 try {
                     fs.unlinkSync(file.path);
-                    process.stderr.write(`[LOGGER] 🗑️  Cleaned old log file: ${file.name}\n`);
+                    cleanedCount++;
                 } catch (error) {
                     process.stderr.write(`[LOGGER] Failed to remove log file ${file.name}: ${error}\n`);
                 }
+            }
+
+            if (cleanedCount > 0) {
+                process.stderr.write(`[LOGGER] 🗑️  Cleaned ${cleanedCount} old log files\n`);
             }
 
             if (files.length > 0) {
@@ -158,6 +171,21 @@ export class Logger {
             }
         } catch (error) {
             process.stderr.write(`[LOGGER] Failed to clean old logs: ${error}\n`);
+        }
+    }
+
+    /**
+     * Update current log file size by reading actual file size
+     * This is more accurate for tracking when to rotate logs
+     */
+    private updateCurrentLogSize(): void {
+        try {
+            if (fs.existsSync(this.currentLogFile)) {
+                const stats = fs.statSync(this.currentLogFile);
+                this.currentLogSize = stats.size;
+            }
+        } catch (error) {
+            process.stderr.write(`[LOGGER] Failed to get current log file size: ${error}\n`);
         }
     }
 
@@ -269,6 +297,41 @@ export class Logger {
             typeof arg === 'object' ? this.safeStringify(arg) : String(arg)
         ).join(' ');
         this.writeLog('debug' as LogLevel, '[DEBUG]', message);
+    }
+
+    /**
+     * Write detailed information to file log (not filtered by log level)
+     * Use this for detailed debug info, performance data, search logs, etc.
+     * Safe for concurrent access from multiple processes.
+     */
+    file(...args: any[]): void {
+        if (!this.enableFileLogging || !this.logStream) {
+            return;
+        }
+
+        const message = args.map(arg => 
+            typeof arg === 'object' ? this.safeStringify(arg) : String(arg)
+        ).join(' ');
+        
+        const timestamp = new Date().toISOString();
+        const logMessage = `[${timestamp}] [FILE] ${message}\n`;
+
+        try {
+            // Use fs.appendFileSync for better concurrency safety
+            // This is slower but ensures atomic writes
+            fs.appendFileSync(this.currentLogFile, logMessage, 'utf8');
+            
+            // Update actual file size instead of tracking in memory
+            // This is more accurate and safe for concurrent access
+            this.updateCurrentLogSize();
+
+            // Check if rotation is needed (less frequent to reduce I/O)
+            if (this.currentLogSize >= this.maxLogSizeMB * 1024 * 1024) {
+                this.rotateLog();
+            }
+        } catch (error) {
+            process.stderr.write(`[LOGGER] Failed to write to log file: ${error}\n`);
+        }
     }
 
     /**

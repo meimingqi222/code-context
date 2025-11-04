@@ -24,6 +24,11 @@ console.error = (...args: any[]) => {
     logger.error(...args);
 };
 
+console.debug = (...args: any[]) => {
+    // Use file logging for debug info
+    logger.file(...args);
+};
+
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {

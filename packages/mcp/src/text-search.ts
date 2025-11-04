@@ -397,10 +397,12 @@ export class TextSearcher {
                 }
             }
 
-            // 减少进度报告频率
-            if (i % (batchSize * 20) === 0 && i > 0) {
+            // 进一步减少进度报告频率，只在整10%时报告
+            if (i > 0 && i % (batchSize * 50) === 0) {
                 const progress = ((i / files.length) * 100).toFixed(1);
-                console.log(`[TEXT-SEARCH] Progress: ${progress}% (${i}/${files.length} files, ${matches.length} matches)`);
+                if (parseFloat(progress) % 10 === 0) { // 只在整10%时报告
+                    console.log(`[TEXT-SEARCH] Progress: ${progress}% (${i}/${files.length} files, ${matches.length} matches)`);
+                }
             }
         }
 
