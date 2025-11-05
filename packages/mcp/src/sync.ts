@@ -2,6 +2,7 @@ import * as fs from "fs";
 import { Context, FileSynchronizer } from "@zilliz/claude-context-core";
 import { SnapshotManager } from "./snapshot.js";
 import { getLogger } from "./logger.js";
+import { getLockManager } from "./lock.js";
 
 export class SyncManager {
     private context: Context;
@@ -29,9 +30,33 @@ export class SyncManager {
         this.logger.file(`[SYNC] Found ${indexedCodebases.length} indexed codebases for sync`);
 
         if (this.isSyncing) {
-            this.logger.file('[SYNC] Index sync already in progress. Skipping.');
+            this.logger.file('[SYNC] Index sync already in progress in this process. Skipping.');
             return;
         }
+
+        // Try to acquire global sync lock across all MCP processes
+        const lockManager = getLockManager();
+        const globalSyncLock = 'global-background-sync';
+        
+        const acquired = await lockManager.tryAcquireLock(globalSyncLock, {
+            timeout: 10 * 60 * 1000, // 10 minutes timeout
+            maxRetries: 0 // Don't retry, just skip if locked
+        });
+        
+        if (!acquired) {
+            const lockInfo = lockManager.getLockInfo(globalSyncLock);
+            if (lockInfo) {
+                this.logger.file(
+                    `[SYNC] Background sync is already running in another MCP process ` +
+                    `(PID ${lockInfo.pid} on ${lockInfo.hostname}). Skipping this sync cycle.`
+                );
+            } else {
+                this.logger.file('[SYNC] Could not acquire sync lock. Another process may be syncing.');
+            }
+            return;
+        }
+        
+        this.logger.file(`[SYNC] Acquired global sync lock (PID ${process.pid})`);
 
         this.isSyncing = true;
         this.logger.file(`[SYNC] Starting index sync for ${indexedCodebases.length} codebases`);
@@ -123,6 +148,11 @@ export class SyncManager {
             console.error(`[SYNC-DEBUG] Error stack:`, error.stack);
         } finally {
             this.isSyncing = false;
+            
+            // Release global sync lock
+            lockManager.releaseLock(globalSyncLock);
+            this.logger.file(`[SYNC] Released global sync lock (PID ${process.pid})`);
+            
             const totalElapsed = Date.now() - syncStartTime;
             console.log(`[SYNC-DEBUG] handleSyncIndex() finished at ${new Date().toISOString()}, total duration: ${totalElapsed}ms`);
         }

@@ -7,6 +7,7 @@ import { SyncManager } from "./sync.js";
 import { ensureAbsolutePath, truncateContent, trackCodebasePath, isPathIndexedOrNested, findIndexedParentDirectory } from "./utils.js";
 import { TextSearcher, TextSearchOptions } from "./text-search.js";
 import { getLogger } from "./logger.js";
+import { getLockManager, getIndexingSemaphore } from "./lock.js";
 
 export class ToolHandlers {
     private context: Context;
@@ -312,7 +313,7 @@ export class ToolHandlers {
                 }
             }
 
-            // Check if already indexing
+            // Check if already indexing in this process
             if (this.snapshotManager.getIndexingCodebases().includes(absolutePath)) {
                 return {
                     content: [{
@@ -321,6 +322,38 @@ export class ToolHandlers {
                     }],
                     isError: true
                 };
+            }
+            
+            // Check semaphore slots availability (max 2 concurrent indexing by default)
+            const semaphore = getIndexingSemaphore(2); // Max 2 concurrent indexing tasks
+            const availableSlots = semaphore.getAvailableSlots();
+            const occupiedSlots = semaphore.getOccupiedSlots();
+            
+            if (availableSlots === 0) {
+                const slotInfo = occupiedSlots.map(s => `PID ${s.info.pid}`).join(', ');
+                return {
+                    content: [{
+                        type: "text",
+                        text: `⏳ **Indexing Queue Full**\n\nMaximum concurrent indexing tasks (2) are already running:\n- Occupied by: ${slotInfo}\n\n**Why this happens**:\nTo optimize resource usage and prevent CPU overload, only 2 indexing tasks can run simultaneously across all agents. This prevents:\n- Too many Ollama processes\n- High CPU/memory consumption\n- System slowdown\n\n**What to do**:\nPlease wait a few minutes for one of the current indexing tasks to complete, then try again.\n\n💡 Tip: You can check indexing status with \`get_indexing_status\``
+                    }],
+                    isError: true
+                };
+            }
+            
+            // Also check codebase-specific lock for safety
+            const lockManager = getLockManager();
+            const codebaseLockKey = `index-${absolutePath}`;
+            if (lockManager.isLocked(codebaseLockKey)) {
+                const lockInfo = lockManager.getLockInfo(codebaseLockKey);
+                if (lockInfo) {
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `Codebase '${absolutePath}' is currently being indexed by another agent process (PID ${lockInfo.pid} on ${lockInfo.hostname}).\n\nPlease wait for the other process to complete the indexing.`
+                        }],
+                        isError: true
+                    };
+                }
             }
 
             //Check if the snapshot and cloud index are in sync
@@ -467,6 +500,51 @@ Ready to explore your codebase!`
     private async startBackgroundIndexing(codebasePath: string, forceReindex: boolean, splitterType: string) {
         const absolutePath = codebasePath;
         let lastSaveTime = 0; // Track last save timestamp
+        
+        // Acquire semaphore slot (max 2 concurrent)
+        const semaphore = getIndexingSemaphore(2);
+        const slotId = await semaphore.tryAcquire({
+            timeout: 2 * 60 * 60 * 1000, // 2 hours
+            maxRetries: 0
+        });
+        
+        if (slotId === null) {
+            const errorMsg = `Cannot start indexing: no available semaphore slots (max 2 concurrent)`;
+            this.logger.file(`[BACKGROUND-INDEX] ${errorMsg}`);
+            
+            // Set to failed status
+            this.snapshotManager.setCodebaseIndexFailed(absolutePath, errorMsg);
+            this.snapshotManager.saveCodebaseSnapshot();
+            return;
+        }
+        
+        this.logger.file(`[BACKGROUND-INDEX] 🎫 Acquired semaphore slot ${slotId}/2 for: ${absolutePath} (PID ${process.pid})`);
+        
+        // Also acquire codebase-specific lock
+        const lockManager = getLockManager();
+        const lockKey = `index-${absolutePath}`;
+        
+        const lockAcquired = await lockManager.tryAcquireLock(lockKey, {
+            timeout: 60 * 60 * 1000, // 1 hour timeout for indexing
+            maxRetries: 0
+        });
+        
+        if (!lockAcquired) {
+            semaphore.release(slotId); // Release semaphore if can't get codebase lock
+            
+            const lockInfo = lockManager.getLockInfo(lockKey);
+            const errorMsg = lockInfo 
+                ? `Cannot start indexing: already locked by PID ${lockInfo.pid} on ${lockInfo.hostname}`
+                : `Cannot start indexing: failed to acquire lock`;
+            this.logger.file(`[BACKGROUND-INDEX] ${errorMsg}`);
+            
+            // Set to failed status
+            this.snapshotManager.setCodebaseIndexFailed(absolutePath, errorMsg);
+            this.snapshotManager.saveCodebaseSnapshot();
+            return;
+        }
+        
+        this.logger.file(`[BACKGROUND-INDEX] 🔒 Acquired codebase lock for: ${absolutePath} (PID ${process.pid})`);
 
         try {
             this.logger.file(`[BACKGROUND-INDEX] Starting background indexing for: ${absolutePath}`);
@@ -551,6 +629,11 @@ Ready to explore your codebase!`
 
             // Log error but don't crash MCP service - indexing errors are handled gracefully
             this.logger.file(`[BACKGROUND-INDEX] Indexing failed for ${absolutePath}: ${errorMessage}`);
+        } finally {
+            // Always release locks when done (success or failure)
+            lockManager.releaseLock(lockKey);
+            semaphore.release(slotId);
+            this.logger.file(`[BACKGROUND-INDEX] 🔓 Released lock and semaphore slot ${slotId} for: ${absolutePath} (PID ${process.pid})`);
         }
     }
 
